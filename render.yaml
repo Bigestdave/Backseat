@@ -11,12 +11,6 @@ services:
         value: production
       - key: DATABASE_URL
         sync: false
-      - key: APP_ORIGIN
-        sync: false
-      - key: WEB_ORIGIN
-        sync: false
-      - key: TRUSTED_ORIGINS
-        sync: false
       - key: TWITCH_CLIENT_ID
         sync: false
       - key: TWITCH_CLIENT_SECRET

@@ -16,16 +16,22 @@ const environment = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   DATABASE_URL: z.string().url(),
-  APP_ORIGIN: z.string().url(),
-  WEB_ORIGIN: z.string().url(),
-  TRUSTED_ORIGINS: z.string().min(1),
+  APP_ORIGIN: z.string().url().optional(),
+  WEB_ORIGIN: z.string().url().optional(),
+  TRUSTED_ORIGINS: z.string().optional(),
+  RENDER_EXTERNAL_URL: z.string().url().optional(),
   TWITCH_CLIENT_ID: z.string().min(1),
   TWITCH_CLIENT_SECRET: z.string().min(1),
   SESSION_SECRET: z.string().min(32),
   TOKEN_ENCRYPTION_KEY: z.string().min(40)
 });
 
-export type AppConfig = z.infer<typeof environment> & {
+type ParsedConfig = z.infer<typeof environment>;
+
+export type AppConfig = Omit<ParsedConfig, "APP_ORIGIN" | "WEB_ORIGIN" | "TRUSTED_ORIGINS" | "RENDER_EXTERNAL_URL"> & {
+  APP_ORIGIN: string;
+  WEB_ORIGIN: string;
+  TRUSTED_ORIGINS: string;
   trustedOrigins: Set<string>;
   twitchRedirectUri: string;
   secureCookies: boolean;
@@ -33,6 +39,14 @@ export type AppConfig = z.infer<typeof environment> & {
 
 export function loadConfig(raw: NodeJS.ProcessEnv = process.env): AppConfig {
   const parsed = environment.parse(raw);
+  const appOrigin = parsed.APP_ORIGIN ?? parsed.RENDER_EXTERNAL_URL;
+
+  if (!appOrigin) {
+    throw new Error("APP_ORIGIN must be set, or the hosting provider must supply RENDER_EXTERNAL_URL.");
+  }
+
+  const webOrigin = parsed.WEB_ORIGIN ?? appOrigin;
+  const trustedOriginList = parsed.TRUSTED_ORIGINS ?? [appOrigin, ...(webOrigin === appOrigin ? [] : [webOrigin])].join(",");
   const encryptionKey = Buffer.from(parsed.TOKEN_ENCRYPTION_KEY, "base64");
 
   if (encryptionKey.length !== 32) {
@@ -40,16 +54,19 @@ export function loadConfig(raw: NodeJS.ProcessEnv = process.env): AppConfig {
   }
 
   const trustedOrigins = new Set(
-    parsed.TRUSTED_ORIGINS.split(",").map((origin) => origin.trim()).filter(Boolean)
+    trustedOriginList.split(",").map((origin) => origin.trim()).filter(Boolean)
   );
-  trustedOrigins.add(parsed.APP_ORIGIN);
-  trustedOrigins.add(parsed.WEB_ORIGIN);
+  trustedOrigins.add(appOrigin);
+  trustedOrigins.add(webOrigin);
 
   return {
     ...parsed,
+    APP_ORIGIN: appOrigin,
+    WEB_ORIGIN: webOrigin,
+    TRUSTED_ORIGINS: trustedOriginList,
     trustedOrigins,
-    twitchRedirectUri: new URL("/auth/twitch/callback", parsed.APP_ORIGIN).toString(),
-    secureCookies: new URL(parsed.APP_ORIGIN).protocol === "https:"
+    twitchRedirectUri: new URL("/auth/twitch/callback", appOrigin).toString(),
+    secureCookies: new URL(appOrigin).protocol === "https:"
   };
 }
 
