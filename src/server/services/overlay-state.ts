@@ -2,7 +2,7 @@ import type { OverlayPhase, OverlaySnapshot, PublicParticipant } from "../../sha
 import type { RoundPhase } from "../domain/rounds";
 
 type OverlayChallenge = {
-  position: 1 | 2 | 3;
+  position: 1 | 2 | 3 | 4;
   title: string;
   durationSeconds: number;
 };

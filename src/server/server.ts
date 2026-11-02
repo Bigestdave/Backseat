@@ -55,7 +55,15 @@ type ChallengeSetSnapshot = {
   id: string;
   version: number;
   votingDurationSeconds: number;
-  options: Array<{ id: string; position: 1 | 2 | 3; title: string; instruction: string; durationSeconds: number }>;
+  options: Array<{
+    id: string;
+    position: VoteOption;
+    title: string;
+    instruction: string;
+    durationSeconds: number;
+    addedByUserId: string;
+    addedByDisplayName: string;
+  }>;
   approvedByUserIds: string[];
 };
 
@@ -68,6 +76,8 @@ type RoundSnapshot = {
   activeAt: Date | null;
   completedAt: Date | null;
   terminalReason: string | null;
+  stoppedByDisplayName: string | null;
+  outcome: "host" | "guest" | "draw" | "stopped" | "none" | null;
   readyUserIds: string[];
   assignments: Array<{
     targetUserId: string;
@@ -80,6 +90,10 @@ type RoundSnapshot = {
     endsAt: Date | null;
     clearedAt: Date | null;
   }>;
+};
+
+type RoundHistorySnapshot = Pick<RoundSnapshot, "id" | "phase" | "completedAt" | "terminalReason" | "stoppedByDisplayName" | "outcome" | "assignments"> & {
+  sequence: number;
 };
 
 function clientUrl(config: AppConfig, query: Record<string, string> = {}): string {
@@ -160,8 +174,11 @@ async function challengeSetForBattle(app: FastifyInstance, versionId: string | n
   if (!version) return null;
   const [options, approvals] = await Promise.all([
     app.database.client<ChallengeSetSnapshot["options"]>`
-      SELECT id, position, title, instruction, duration_seconds AS "durationSeconds"
-      FROM challenge_options WHERE challenge_set_version_id = ${versionId}
+      SELECT option.id, option.position, option.title, option.instruction, option.duration_seconds AS "durationSeconds",
+        option.added_by_user_id AS "addedByUserId", author.display_name AS "addedByDisplayName"
+      FROM challenge_options option
+      JOIN users author ON author.id = option.added_by_user_id
+      WHERE option.challenge_set_version_id = ${versionId}
       ORDER BY position
     `,
     app.database.client<{ userId: string }[]>`
@@ -177,8 +194,10 @@ async function roundForBattle(app: FastifyInstance, roundId: string | null): Pro
   const [round] = await app.database.client<Omit<RoundSnapshot, "readyUserIds" | "assignments">[]>`
     SELECT id, phase, state_version AS "stateVersion", voting_deadline_at AS "votingDeadlineAt",
       countdown_starts_at AS "countdownStartsAt", active_at AS "activeAt", completed_at AS "completedAt",
-      terminal_reason AS "terminalReason"
-    FROM rounds WHERE id = ${roundId}
+      terminal_reason AS "terminalReason", stopper.display_name AS "stoppedByDisplayName", outcome
+    FROM rounds
+    LEFT JOIN users stopper ON stopper.id = rounds.stopped_by_user_id
+    WHERE rounds.id = ${roundId}
   `;
   if (!round) return null;
   const [ready, assignments] = await Promise.all([
@@ -198,6 +217,45 @@ async function roundForBattle(app: FastifyInstance, roundId: string | null): Pro
     `
   ]);
   return { ...round, readyUserIds: ready.map((entry) => entry.userId), assignments };
+}
+
+async function roundHistoryForBattle(app: FastifyInstance, battleId: string): Promise<RoundHistorySnapshot[]> {
+  const history = await app.database.client<Array<{
+    id: string;
+    sequence: number;
+    phase: RoundHistorySnapshot["phase"];
+    completedAt: Date | null;
+    terminalReason: string | null;
+    stoppedByDisplayName: string | null;
+    outcome: RoundHistorySnapshot["outcome"];
+  }>>`
+    SELECT round.id, round.sequence, round.phase, round.completed_at AS "completedAt",
+      round.terminal_reason AS "terminalReason", stopper.display_name AS "stoppedByDisplayName", round.outcome
+    FROM rounds round
+    LEFT JOIN users stopper ON stopper.id = round.stopped_by_user_id
+    WHERE round.battle_id = ${battleId}
+      AND round.phase IN ('complete', 'no-votes', 'stopped', 'invalidated')
+    ORDER BY round.sequence DESC
+  `;
+  if (history.length === 0) return [];
+  const assignments = await app.database.client<Array<RoundSnapshot["assignments"][number] & { roundId: string }>>`
+    SELECT assignment.round_id AS "roundId", assignment.target_user_id AS "targetUserId", target.display_name AS "targetDisplayName",
+      option.title, option.instruction, option.duration_seconds AS "durationSeconds", assignment.resolution,
+      assignment.starts_at AS "startsAt", assignment.ends_at AS "endsAt", assignment.cleared_at AS "clearedAt"
+    FROM round_assignments assignment
+    JOIN users target ON target.id = assignment.target_user_id
+    LEFT JOIN challenge_options option ON option.id = assignment.challenge_option_id
+    WHERE assignment.round_id = ANY(${app.database.client.array(history.map((round) => round.id), 2950)})
+    ORDER BY assignment.round_id, target.display_name
+  `;
+  const assignmentsByRound = new Map<string, RoundSnapshot["assignments"]>();
+  for (const assignment of assignments) {
+    const { roundId, ...rest } = assignment;
+    const bucket = assignmentsByRound.get(roundId) ?? [];
+    bucket.push(rest);
+    assignmentsByRound.set(roundId, bucket);
+  }
+  return history.map((round) => ({ ...round, assignments: assignmentsByRound.get(round.id) ?? [] }));
 }
 
 async function loadOverlaySnapshot(app: FastifyInstance, credentialId: string): Promise<OverlaySnapshot> {
@@ -403,15 +461,15 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
       await transaction`
         INSERT INTO challenge_set_versions (
           id, battle_id, version, proposed_by_user_id, voting_duration_seconds, created_at
-        ) VALUES (${versionId}, ${battleId}, 1, ${hostId}, 30, ${timestamp(transaction, now)})
+        ) VALUES (${versionId}, ${battleId}, 1, ${hostId}, 18, ${timestamp(transaction, now)})
       `;
       for (const option of DEFAULT_CHALLENGES) {
         await transaction`
           INSERT INTO challenge_options (
-            id, challenge_set_version_id, position, title, instruction, duration_seconds, created_at
+            id, challenge_set_version_id, position, title, instruction, duration_seconds, added_by_user_id, created_at
           ) VALUES (
             ${optionIds.get(option.position)!}, ${versionId}, ${option.position}, ${option.title},
-            ${option.instruction}, ${option.durationSeconds}, ${timestamp(transaction, now)}
+            ${option.instruction}, ${option.durationSeconds}, ${hostId}, ${timestamp(transaction, now)}
           )
         `;
       }
@@ -436,13 +494,14 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     const user = await requireCreatorSession(database, request);
     const battle = await currentBattleForUser(app, user.id);
     if (!battle) return { serverTime: new Date().toISOString(), battle: null };
-    const [participants, challengeSet, round] = await Promise.all([
+    const [participants, challengeSet, round, history] = await Promise.all([
       participantsForBattle(app, battle.id),
       challengeSetForBattle(app, battle.currentChallengeSetVersionId),
-      roundForBattle(app, battle.currentRoundId)
+      roundForBattle(app, battle.currentRoundId),
+      roundHistoryForBattle(app, battle.id)
     ]);
     const [lastVote] = await database.client<{
-      option: "1" | "2" | "3";
+      option: "1" | "2" | "3" | "4";
       sourceDisplayName: string;
       targetDisplayName: string;
       receivedAt: Date;
@@ -462,6 +521,11 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
         participants,
         challengeSet,
         round,
+        history,
+        score: {
+          host: history.filter((entry) => entry.outcome === "host").length,
+          guest: history.filter((entry) => entry.outcome === "guest").length
+        },
         lastAcceptedVote: lastVote ?? null
       }
     };
@@ -611,15 +675,16 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
   });
 
   const challengeOptionSchema = z.object({
-    position: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+    position: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
     title: z.string().trim().min(1).max(80),
     instruction: z.string().trim().min(1).max(180),
-    durationSeconds: z.number().int().min(1).max(300)
+    durationSeconds: z.union([z.literal(10), z.literal(20), z.literal(30), z.literal(60)]),
+    sourceOptionId: z.uuid().optional()
   });
   const challengeSetSchema = z.object({
     stateVersion: z.number().int().min(0),
     votingDurationSeconds: z.number().int().min(5).max(120),
-    options: z.array(challengeOptionSchema).length(3)
+    options: z.array(challengeOptionSchema).min(2).max(4)
   });
   const stateVersionSchema = z.object({ stateVersion: z.number().int().min(0) });
 
@@ -690,6 +755,17 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     return reply.status(204).send();
   });
 
+  app.post("/api/battles/current/rounds/:roundId/lock-picks", async (request, reply) => {
+    assertTrustedOrigin(request, config);
+    const user = await requireCreatorSession(database, request);
+    enforceRateLimit(rateLimiter, `battle-write:${user.id}`, 40, 60_000);
+    const battle = await requireCurrentBattle(app, user.id);
+    const { roundId } = roundParamsSchema.parse(request.params);
+    const { stateVersion } = stateVersionSchema.parse(request.body);
+    await battles.lockInPicks(battle.id, user.id, roundId, stateVersion);
+    return reply.status(204).send();
+  });
+
   app.post("/api/battles/current/rounds/:roundId/stop", async (request, reply) => {
     assertTrustedOrigin(request, config);
     const user = await requireCreatorSession(database, request);
@@ -700,6 +776,17 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     // normal state-version check: a late stop may still protect a live round,
     // but can never affect the round opened after it.
     await battles.stopRound(battle.id, user.id, roundId);
+    return reply.status(204).send();
+  });
+
+  app.post("/api/battles/current/rounds/:roundId/outcome", async (request, reply) => {
+    assertTrustedOrigin(request, config);
+    const user = await requireCreatorSession(database, request);
+    enforceRateLimit(rateLimiter, `battle-write:${user.id}`, 20, 60_000);
+    const battle = await requireCurrentBattle(app, user.id);
+    const { roundId } = roundParamsSchema.parse(request.params);
+    const { outcome } = z.object({ outcome: z.enum(["host", "guest", "draw"]) }).parse(request.body);
+    await battles.recordRoundOutcome(battle.id, user.id, roundId, outcome);
     return reply.status(204).send();
   });
 
@@ -716,7 +803,7 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
 
   const simulatedVoteSchema = z.object({
     sourceRole: z.enum(["host", "guest"]),
-    option: z.union([z.literal(1), z.literal(2), z.literal(3)])
+    option: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)])
   });
 
   app.post("/api/demo/votes", async (request) => {
@@ -740,7 +827,7 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
       messageId: `demo-message:${randomUUID()}`,
       sourceChannelTwitchId: source.twitchId,
       viewerTwitchId: `demo-viewer:${battle.id}:${sourceRole}`,
-      text: `!vote ${option}`,
+      text: `!pick ${option}`,
       receivedAt: new Date()
     });
   });

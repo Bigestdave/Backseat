@@ -14,6 +14,7 @@ import {
   type ChallengeDraft,
   type CreatorRole,
   type RoundPhase,
+  type VoteTally,
   type VoteOption
 } from "../domain/rounds";
 import type { BattleEventBus } from "./event-bus";
@@ -83,7 +84,7 @@ function isNonterminal(phase: RoundPhase): boolean {
 }
 
 function toChallengeInput(input?: ChallengeSetInput): ChallengeSetInput {
-  const candidate = input ?? { options: DEFAULT_CHALLENGES, votingDurationSeconds: 30 };
+  const candidate = input ?? { options: DEFAULT_CHALLENGES, votingDurationSeconds: 18 };
   try {
     validateChallengeDrafts(candidate.options);
     votingDeadline(new Date(0), candidate.votingDurationSeconds);
@@ -102,9 +103,20 @@ export class BattleService {
     const challengeSet = toChallengeInput(input);
     const result = await this.database.client.begin(async (transaction) => {
       const membership = await this.membershipForUpdate(transaction, battleId, userId);
-      if (membership.role !== "host") throw serviceError("Only the host can edit the challenge set.", 403);
       expectedVersion(membership.stateVersion, stateVersion);
       await this.assertNoLiveRound(transaction, membership.currentRoundId);
+
+      const retainedAuthors = new Map<string, string>();
+      if (membership.currentChallengeSetVersionId) {
+        const previousOptions = await transaction<{ id: string; addedByUserId: string }[]>`
+          SELECT id, added_by_user_id AS "addedByUserId"
+          FROM challenge_options
+          WHERE challenge_set_version_id = ${membership.currentChallengeSetVersionId}
+          FOR UPDATE
+        `;
+        for (const option of previousOptions) retainedAuthors.set(option.id, option.addedByUserId);
+      }
+      const claimedSources = new Set<string>();
 
       const [next] = await transaction<{ version: number }[]>`
         SELECT COALESCE(MAX(version), 0) + 1 AS "version"
@@ -120,12 +132,20 @@ export class BattleService {
         )
       `;
       for (const option of challengeSet.options) {
+        let addedByUserId = userId;
+        if (option.sourceOptionId) {
+          if (claimedSources.has(option.sourceOptionId)) throw serviceError("A challenge can only appear once in the next version.", 400);
+          const originalAuthor = retainedAuthors.get(option.sourceOptionId);
+          if (!originalAuthor) throw serviceError("A challenge can only be carried forward from the current list.", 400);
+          claimedSources.add(option.sourceOptionId);
+          addedByUserId = originalAuthor;
+        }
         await transaction`
           INSERT INTO challenge_options (
-            id, challenge_set_version_id, position, title, instruction, duration_seconds, created_at
+            id, challenge_set_version_id, position, title, instruction, duration_seconds, added_by_user_id, created_at
           ) VALUES (
             ${randomUUID()}, ${versionId}, ${option.position}, ${option.title.trim()},
-            ${option.instruction.trim()}, ${option.durationSeconds}, ${timestamp(transaction, now)}
+            ${option.instruction.trim()}, ${option.durationSeconds}, ${addedByUserId}, ${timestamp(transaction, now)}
           )
         `;
       }
@@ -214,7 +234,6 @@ export class BattleService {
   async openVoting(battleId: string, userId: string, stateVersion: number): Promise<{ roundId: string; deadline: Date; stateVersion: number }> {
     const result = await this.database.client.begin(async (transaction) => {
       const membership = await this.membershipForUpdate(transaction, battleId, userId);
-      if (membership.role !== "host") throw serviceError("Only the host can open voting.", 403);
       expectedVersion(membership.stateVersion, stateVersion);
       if (!membership.guestUserId) throw serviceError("A rival must join before voting can open.");
       if (!membership.currentChallengeSetVersionId) throw serviceError("Approve a challenge set before opening voting.");
@@ -309,6 +328,14 @@ export class BattleService {
       };
       const vote = routeVote(message, routing);
       if (!vote) return { kind: "ignored" } as const;
+
+      const [supportedOption] = await transaction<{ position: VoteOption }[]>`
+        SELECT position
+        FROM challenge_options
+        WHERE challenge_set_version_id = ${round.challengeSetVersionId}
+          AND position = ${vote.option}
+      `;
+      if (!supportedOption) return { kind: "ignored" } as const;
 
       const insertedLock = await transaction<{ sourceChannelTwitchId: string }[]>`
         INSERT INTO battle_team_locks (
@@ -435,6 +462,24 @@ export class BattleService {
     this.events.publish(battleId);
   }
 
+  async lockInPicks(battleId: string, userId: string, roundId: string, stateVersion: number): Promise<void> {
+    await this.database.client.begin(async (transaction) => {
+      const membership = await this.membershipForUpdate(transaction, battleId, userId);
+      expectedVersion(membership.stateVersion, stateVersion);
+      if (membership.currentRoundId !== roundId) throw serviceError("That round is no longer current.", 409);
+      const round = await this.roundForUpdate(transaction, roundId);
+      if (round.phase !== "voting") throw serviceError("Picks can only be locked while chat is choosing.");
+
+      const now = new Date();
+      await transaction`
+        UPDATE rounds SET voting_deadline_at = ${timestamp(transaction, now)}
+        WHERE id = ${roundId} AND phase = 'voting'
+      `;
+      await this.finalizeVoting(transaction, { ...round, votingDeadlineAt: now }, now);
+    });
+    this.events.publish(battleId);
+  }
+
   async stopRound(battleId: string, userId: string, roundId: string): Promise<void> {
     await this.database.client.begin(async (transaction) => {
       const membership = await this.membershipForUpdate(transaction, battleId, userId);
@@ -446,6 +491,7 @@ export class BattleService {
       await transaction`
         UPDATE rounds
         SET phase = 'stopped', completed_at = ${timestamp(transaction, now)}, terminal_reason = 'creator-stop',
+          stopped_by_user_id = ${userId}, outcome = 'stopped',
           state_version = state_version + 1, updated_at = ${timestamp(transaction, now)}
         WHERE id = ${roundId}
       `;
@@ -456,6 +502,37 @@ export class BattleService {
       await this.bumpBattleState(transaction, battleId, now);
     });
     this.events.publish(battleId);
+  }
+
+  async recordRoundOutcome(
+    battleId: string,
+    userId: string,
+    roundId: string,
+    outcome: "host" | "guest" | "draw"
+  ): Promise<void> {
+    const changed = await this.database.client.begin(async (transaction) => {
+      await this.membershipForUpdate(transaction, battleId, userId);
+      const round = await this.roundForUpdate(transaction, roundId);
+      if (round.battleId !== battleId || round.phase !== "complete") {
+        throw serviceError("A winner can only be recorded after a completed round.");
+      }
+      const updated = await transaction<{ id: string }[]>`
+        UPDATE rounds
+        SET outcome = ${outcome}, updated_at = ${timestamp(transaction, new Date())}
+        WHERE id = ${roundId} AND outcome IS NULL
+        RETURNING id
+      `;
+      if (updated.length === 0) {
+        const [saved] = await transaction<{ outcome: string | null }[]>`
+          SELECT outcome FROM rounds WHERE id = ${roundId}
+        `;
+        if (saved?.outcome !== outcome) throw serviceError("This round already has a recorded result.");
+        return false;
+      }
+      await this.bumpBattleState(transaction, battleId, new Date());
+      return true;
+    });
+    if (changed) this.events.publish(battleId);
   }
 
   async endBattle(battleId: string, userId: string, stateVersion: number): Promise<void> {
@@ -469,6 +546,7 @@ export class BattleService {
           await transaction`
             UPDATE rounds
             SET phase = 'stopped', completed_at = ${timestamp(transaction, now)}, terminal_reason = 'battle-ended',
+              stopped_by_user_id = ${userId}, outcome = 'stopped',
               state_version = state_version + 1, updated_at = ${timestamp(transaction, now)}
             WHERE id = ${round.id}
           `;
@@ -520,11 +598,15 @@ export class BattleService {
       `;
       if (!connected && membership.currentRoundId) {
         const round = await this.roundForUpdate(transaction, membership.currentRoundId);
-        if (isNonterminal(round.phase)) {
+        // An active challenge keeps running: viewers already chose it and a
+        // reconnect cannot change its result. A pick or countdown is cancelled
+        // instead, because its chat result would be incomplete.
+        if (isNonterminal(round.phase) && round.phase !== "active") {
           assertRoundTransition(round.phase, "invalidated");
           await transaction`
             UPDATE rounds
             SET phase = 'invalidated', completed_at = ${timestamp(transaction, now)}, terminal_reason = 'chat-disconnected',
+              outcome = 'none',
               state_version = state_version + 1, updated_at = ${timestamp(transaction, now)}
             WHERE id = ${round.id}
           `;
@@ -619,8 +701,8 @@ export class BattleService {
     let hasSelection = false;
 
     for (const targetUserId of targets) {
-      const tally = { 1: 0, 2: 0, 3: 0 } as Record<VoteOption, number>;
-      for (const vote of votes) if (vote.targetUserId === targetUserId) tally[vote.option] += vote.count;
+      const tally = Object.fromEntries(options.map((option) => [option.position, 0])) as VoteTally;
+      for (const vote of votes) if (vote.targetUserId === targetUserId) tally[vote.option] = (tally[vote.option] ?? 0) + vote.count;
       const resolution = resolveVoteTally(tally, (maximum) => randomInt(maximum));
       if (resolution.kind === "no-votes") {
         await sql`
@@ -645,7 +727,8 @@ export class BattleService {
     await sql`
       UPDATE rounds
       SET phase = ${nextPhase}, revealed_at = ${timestamp(sql, now)}, completed_at = ${hasSelection ? null : timestamp(sql, now)},
-        terminal_reason = ${hasSelection ? null : "no-votes"}, state_version = state_version + 1, updated_at = ${timestamp(sql, now)}
+        terminal_reason = ${hasSelection ? null : "no-votes"}, outcome = ${hasSelection ? null : "none"},
+        state_version = state_version + 1, updated_at = ${timestamp(sql, now)}
       WHERE id = ${round.id} AND phase = 'voting'
     `;
     await this.bumpBattleState(sql, round.battleId, now);

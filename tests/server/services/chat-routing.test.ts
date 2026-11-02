@@ -34,6 +34,8 @@ function message(overrides: Partial<ChatMessage> = {}): ChatMessage {
 
 describe("parseVoteCommand", () => {
   it.each([
+    ["!pick 1", 1],
+    ["!PICK 4", 4],
     ["!vote 1", 1],
     ["!VOTE 2", 2],
     ["  !vote\t3  ", 3]
@@ -46,10 +48,10 @@ describe("parseVoteCommand", () => {
     "!vote",
     "!vote1",
     "!vote 0",
-    "!vote 4",
+    "!pick 5",
     "!vote 1 please",
     "hello !vote 1",
-    "!pick 1"
+    "!choose 1"
   ])("rejects non-vote command %j", (text) => {
     expect(parseVoteCommand(text)).toBeNull();
   });

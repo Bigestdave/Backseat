@@ -7,7 +7,7 @@ export type PublicParticipant = {
 };
 
 export type PublicChallenge = {
-  position: 1 | 2 | 3;
+  position: 1 | 2 | 3 | 4;
   title: string;
   durationSeconds: number;
 };

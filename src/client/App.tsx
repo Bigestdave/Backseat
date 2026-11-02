@@ -18,18 +18,21 @@ type Participant = {
   chatConnectedAt: string | null;
 };
 
+type PickPosition = 1 | 2 | 3 | 4;
+
 type ChallengeDraft = {
-  position: 1 | 2 | 3;
+  position: PickPosition;
   title: string;
   instruction: string;
   durationSeconds: number;
+  sourceOptionId?: string;
 };
 
 type ChallengeSet = {
   id: string;
   version: number;
   votingDurationSeconds: number;
-  options: Array<ChallengeDraft & { id: string }>;
+  options: Array<ChallengeDraft & { id: string; addedByUserId: string; addedByDisplayName: string }>;
   approvedByUserIds: string[];
 };
 
@@ -54,12 +57,14 @@ type Round = {
   activeAt: string | null;
   completedAt: string | null;
   terminalReason: string | null;
+  stoppedByDisplayName: string | null;
+  outcome: "host" | "guest" | "draw" | "stopped" | "none" | null;
   readyUserIds: string[];
   assignments: RoundAssignment[];
 };
 
 type LastAcceptedVote = {
-  option: "1" | "2" | "3";
+  option: "1" | "2" | "3" | "4";
   sourceDisplayName: string;
   targetDisplayName: string;
   receivedAt: string;
@@ -74,6 +79,8 @@ type Battle = {
   participants: Participant[];
   challengeSet: ChallengeSet | null;
   round: Round | null;
+  history: Array<Round & { sequence: number }>;
+  score: { host: number; guest: number };
   lastAcceptedVote: LastAcceptedVote | null;
 };
 
@@ -90,6 +97,19 @@ const DEFAULT_CHALLENGES: ChallengeDraft[] = [
   { position: 2, title: "No jumping", instruction: "Keep all wheels on the ground.", durationSeconds: 20 },
   { position: 3, title: "Reverse only", instruction: "Move only in reverse.", durationSeconds: 10 }
 ];
+
+const DURATION_OPTIONS = [10, 20, 30, 60] as const;
+
+function draftOptions(challengeSet: ChallengeSet | null): ChallengeDraft[] {
+  if (!challengeSet) return DEFAULT_CHALLENGES.map((option) => ({ ...option }));
+  return challengeSet.options.map((option) => ({
+    position: option.position,
+    title: option.title,
+    instruction: option.instruction,
+    durationSeconds: option.durationSeconds,
+    sourceOptionId: option.id
+  }));
+}
 
 class ApiError extends Error {
   constructor(message: string, readonly status: number) {
@@ -169,17 +189,24 @@ function copyText(value: string): Promise<void> {
 
 function Logo({ compact = false }: { compact?: boolean }): ReactNode {
   return (
-    <span className={`brand ${compact ? "brand--compact" : ""}`} aria-label="Backseat">
-      <span>BACK</span><span className="brand__accent">SEAT</span><span className="brand__bolt" aria-hidden="true">ϟ</span>
+    <span className={`brand ${compact ? "brand--compact" : ""}`}>
+      <img src="/assets/wordmark-brand.png" alt="Backseat" />
+      <img className="brand__bolt" src="/assets/lightning.png" alt="" aria-hidden="true" />
     </span>
   );
 }
 
 function CreatorMark({ name, role }: { name: string; role: "host" | "guest" }): ReactNode {
   const initial = name.trim().slice(0, 1).toUpperCase() || "?";
+  const normalized = name.toLowerCase();
+  const avatar = normalized.includes("fredlock")
+    ? "/assets/fredlocks-avatar.png"
+    : normalized.includes("rampage")
+      ? "/assets/rampagegod-avatar.png"
+      : null;
   return (
     <span className={`creator-mark creator-mark--${role}`} aria-hidden="true">
-      <span>{initial}</span>
+      {avatar ? <img src={avatar} alt="" /> : <span>{initial}</span>}
     </span>
   );
 }
@@ -220,7 +247,7 @@ function PageShell({ children }: { children: ReactNode }): ReactNode {
     <div className="app-shell">
       <header className="site-header">
         <Logo />
-        <span className="site-header__label">Two creators. Two communities.</span>
+        <span className="site-header__label">Two streamers. Two chats.</span>
       </header>
       {children}
     </div>
@@ -247,15 +274,15 @@ function CreatorLanding({ invite, oauthMessage, startingDemo, onStartDemo }: {
   return (
     <PageShell>
       <main className="landing-stage">
-        <section className="paired-portraits" aria-label="Backseat is for two Twitch creators">
-          <div className="portrait-plate portrait-plate--host"><CreatorMark name="F" role="host" /></div>
-          <span className="stage-bolt" aria-hidden="true">ϟ</span>
-          <div className="portrait-plate portrait-plate--guest"><CreatorMark name="R" role="guest" /></div>
+        <section className="paired-portraits" aria-label="Backseat is for two Twitch streamers">
+          <div className="portrait-plate portrait-plate--host"><img src="/assets/fredlocks-cutout.png" alt="" /></div>
+          <img className="stage-bolt" src="/assets/lightning.png" alt="" aria-hidden="true" />
+          <div className="portrait-plate portrait-plate--guest"><img src="/assets/rampagegod-cutout.png" alt="" /></div>
         </section>
         <section className="lower-sheet lower-sheet--landing">
-          <p className="eyebrow">Creator coordination for Twitch</p>
+          <p className="eyebrow">Twitch head-to-head</p>
           <h1>Let chat backseat your rival.</h1>
-          <p className="lede">Connect your Twitch account, invite one creator, then prove their chat commands target the opposing player.</p>
+          <p className="lede">Two streamers approve the challenges. Each chat picks which one the rival has to face.</p>
           {invite && <Notice>A battle invitation is waiting. Sign in, then explicitly choose whether to join.</Notice>}
           {oauthMessage && <Notice tone="error">{oauthMessage}</Notice>}
           <div className="landing-actions">
@@ -285,7 +312,7 @@ function InviteDecision({ invite, battle, accepting, onAccept }: {
       <section className="invite-decision" aria-labelledby="invite-title">
         <p className="eyebrow">Invitation pending</p>
         <h2 id="invite-title">You already have an open battle.</h2>
-        <p>Backseat keeps one open battle per creator. Finish or leave the current battle before accepting another invitation.</p>
+        <p>Backseat keeps one open battle per streamer. Finish or leave the current battle before accepting another invitation.</p>
       </section>
     );
   }
@@ -293,7 +320,7 @@ function InviteDecision({ invite, battle, accepting, onAccept }: {
   return (
     <section className="invite-decision" aria-labelledby="invite-title">
       <p className="eyebrow">Invitation pending</p>
-      <h2 id="invite-title">Join this two-creator integration proof?</h2>
+      <h2 id="invite-title">Join this two-streamer session?</h2>
       <p>You will occupy the guest seat. Joining does not open voting or start a round.</p>
       <button className="button button--primary" type="button" disabled={accepting} onClick={() => void onAccept()}>
         {accepting ? "Joining…" : "Join battle"}
@@ -307,14 +334,14 @@ function BattleIdentity({ battle, user }: { battle: Battle; user: SessionUser })
   const guest = battle.participants.find((participant) => participant.role === "guest");
 
   return (
-    <section className="battle-identity" aria-label="Battle creators">
+    <section className="battle-identity" aria-label="Battle streamers">
       <div className="battle-identity__creator">
         <CreatorMark name={host?.displayName ?? "?"} role="host" />
-        <div><strong>@{host?.displayName ?? "Waiting for host"}</strong><span>{host?.userId === user.id ? "You · Host" : "Host creator"} · {host?.chatConnectedAt ? (battle.mode === "simulated" ? "Simulated chat" : "Chat connected") : "Chat reconnecting"}</span></div>
+        <div><strong>@{host?.displayName ?? "Waiting for host"}</strong><span>{host?.userId === user.id ? "You" : "Streamer"} · {host?.chatConnectedAt ? (battle.mode === "simulated" ? "Simulated chat" : "Chat connected") : "Chat reconnecting"}</span></div>
       </div>
-      <span className="battle-identity__bolt" aria-hidden="true">ϟ</span>
+      <img className="battle-identity__bolt" src="/assets/lightning.png" alt="" aria-hidden="true" />
       <div className="battle-identity__creator battle-identity__creator--right">
-        <div><strong>@{guest?.displayName ?? "Waiting for rival"}</strong><span>{guest ? `${guest.userId === user.id ? "You · Guest" : "Guest creator"} · ${guest.chatConnectedAt ? (battle.mode === "simulated" ? "Simulated chat" : "Chat connected") : "Chat reconnecting"}` : "Invite a rival"}</span></div>
+        <div><strong>@{guest?.displayName ?? "Waiting for rival"}</strong><span>{guest ? `${guest.userId === user.id ? "You" : "Rival"} · ${guest.chatConnectedAt ? (battle.mode === "simulated" ? "Simulated chat" : "Chat connected") : "Chat reconnecting"}` : "Invite your rival"}</span></div>
         <CreatorMark name={guest?.displayName ?? "?"} role="guest" />
       </div>
     </section>
@@ -334,7 +361,9 @@ function BattleControls({
   onReady,
   onUnready,
   onCancelStart,
+  onLockInPicks,
   onStopRound,
+  onRecordOutcome,
   onEndBattle,
   onSimulateVote,
   onSimulateRivalReady
@@ -351,14 +380,18 @@ function BattleControls({
   onReady: (roundId: string) => Promise<boolean>;
   onUnready: (roundId: string) => Promise<boolean>;
   onCancelStart: (roundId: string) => Promise<boolean>;
+  onLockInPicks: (roundId: string) => Promise<boolean>;
   onStopRound: (roundId: string) => Promise<boolean>;
+  onRecordOutcome: (roundId: string, outcome: "host" | "guest" | "draw") => Promise<boolean>;
   onEndBattle: () => Promise<boolean>;
-  onSimulateVote: (sourceRole: "host" | "guest", option: 1 | 2 | 3) => Promise<boolean>;
+  onSimulateVote: (sourceRole: "host" | "guest", option: PickPosition) => Promise<boolean>;
   onSimulateRivalReady: (roundId: string) => Promise<boolean>;
 }): ReactNode {
   const [editorOpen, setEditorOpen] = useState(!battle.challengeSet);
-  const [options, setOptions] = useState<ChallengeDraft[]>(() => battle.challengeSet?.options.map(({ id: _id, ...option }) => option) ?? DEFAULT_CHALLENGES.map((option) => ({ ...option })));
-  const [votingDurationSeconds, setVotingDurationSeconds] = useState(String(battle.challengeSet?.votingDurationSeconds ?? 30));
+  const [options, setOptions] = useState<ChallengeDraft[]>(() => draftOptions(battle.challengeSet));
+  const [votingDurationSeconds, setVotingDurationSeconds] = useState(String(battle.challengeSet?.votingDurationSeconds ?? 18));
+  const [stopArmed, setStopArmed] = useState(false);
+  const [endArmed, setEndArmed] = useState(false);
   const hasRival = battle.participants.some((participant) => participant.role === "guest");
   const ownOverlayConfirmed = battle.participants.some((participant) => participant.userId === user.id && participant.overlayConfirmedAt);
   const bothOverlaysConfirmed = battle.participants.length === 2 && battle.participants.every((participant) => participant.overlayConfirmedAt);
@@ -368,26 +401,66 @@ function BattleControls({
   const bothApproved = challengeSet?.approvedByUserIds.length === 2;
   const round = battle.round;
   const liveRound = Boolean(round && ["voting", "revealed", "countdown", "active"].includes(round.phase));
-  const canEdit = battle.role === "host" && !liveRound;
+  const canEdit = !liveRound;
 
-  function updateOption(position: 1 | 2 | 3, field: keyof Omit<ChallengeDraft, "position">, value: string): void {
+  useEffect(() => {
+    if (!editorOpen) return;
+    setOptions(draftOptions(battle.challengeSet));
+    setVotingDurationSeconds(String(battle.challengeSet?.votingDurationSeconds ?? 18));
+  }, [battle.challengeSet?.id, editorOpen]);
+
+  function updateOption(position: PickPosition, field: "title" | "instruction" | "durationSeconds", value: string): void {
     setOptions((current) => current.map((option) => option.position === position
       ? { ...option, [field]: field === "durationSeconds" ? Number(value) : value }
       : option
     ));
   }
 
+  function addOption(): void {
+    setOptions((current) => current.length >= 4
+      ? current
+      : [...current, { position: (current.length + 1) as PickPosition, title: "", instruction: "Follow this challenge.", durationSeconds: 20 }]
+    );
+  }
+
+  function removeOption(position: PickPosition): void {
+    setOptions((current) => current.length <= 2
+      ? current
+      : current.filter((option) => option.position !== position).map((option, index) => ({ ...option, position: (index + 1) as PickPosition }))
+    );
+  }
+
   async function submitChallenges(): Promise<void> {
     if (await onProposeChallenges(options, Number(votingDurationSeconds))) setEditorOpen(false);
+  }
+
+  function requestStop(roundId: string): void {
+    if (stopArmed) {
+      setStopArmed(false);
+      void onStopRound(roundId);
+      return;
+    }
+    setStopArmed(true);
+    window.setTimeout(() => setStopArmed(false), 2_500);
+  }
+
+  function requestEndBattle(): void {
+    if (endArmed) {
+      setEndArmed(false);
+      void onEndBattle();
+      return;
+    }
+    setEndArmed(true);
+    window.setTimeout(() => setEndArmed(false), 2_500);
   }
 
   return (
     <>
       <section className="integration-proof" aria-labelledby="battle-title">
         <div>
-          <p className="eyebrow">Two-creator battle</p>
+          <p className="eyebrow">Head-to-head</p>
           <h2 id="battle-title">Agree on challenges. Let chat choose the rival’s.</h2>
-          <p className="lede">Backseat records every phase on the server. Controls only request an allowed transition.</p>
+          <p className="lede">You build the challenge list together. Each chat picks for the other streamer.</p>
         </div>
         <span className={`mode-label ${battle.mode === "simulated" ? "mode-label--simulated" : ""}`}>
           {battle.mode === "simulated" ? "Simulated mode" : "Real Twitch mode"}
@@ -395,16 +468,16 @@ function BattleControls({
       </section>
 
       <section className="proof-list" aria-label="Battle setup status">
-        <div className="proof-row"><strong>Rival seat</strong><span>{hasRival ? "Ready — both creators are present" : "Waiting for the invitation to be accepted"}</span></div>
-        <div className="proof-row"><strong>Challenge set</strong><span>{challengeSet ? `Version ${challengeSet.version}${bothApproved ? " approved by both creators" : " awaiting approval"}` : "Host must propose the first version"}</span></div>
-        <div className="proof-row"><strong>OBS confirmation</strong><span>{bothOverlaysConfirmed ? "Both creators confirmed their own browser source" : "Each creator must manually confirm their own browser source"}</span></div>
+        <div className="proof-row"><strong>Rival seat</strong><span>{hasRival ? "Ready — both streamers are here" : "Waiting for the invitation to be accepted"}</span></div>
+        <div className="proof-row"><strong>Challenge set</strong><span>{challengeSet ? `Version ${challengeSet.version}${bothApproved ? " approved by both streamers" : " awaiting approval"}` : "Build the shared list after your rival joins"}</span></div>
+        <div className="proof-row"><strong>OBS confirmation</strong><span>{bothOverlaysConfirmed ? "Both streamers confirmed their own browser source" : "Each streamer confirms their own browser source"}</span></div>
         <div className="proof-row"><strong>Twitch chat feeds</strong><span>{bothChatsConnected ? (battle.mode === "simulated" ? "Both simulated chats are ready" : "Both live chat subscriptions are connected") : "Waiting for both live chat subscriptions"}</span></div>
-        <div className="proof-row"><strong>Latest accepted chat command</strong><span>{battle.lastAcceptedVote ? `@${battle.lastAcceptedVote.sourceDisplayName}'s chat → @${battle.lastAcceptedVote.targetDisplayName} · !vote ${battle.lastAcceptedVote.option} · ${formatWhen(battle.lastAcceptedVote.receivedAt)}` : "No accepted command yet."}</span></div>
+        <div className="proof-row"><strong>Latest accepted pick</strong><span>{battle.lastAcceptedVote ? `@${battle.lastAcceptedVote.sourceDisplayName}'s chat → @${battle.lastAcceptedVote.targetDisplayName} · !pick ${battle.lastAcceptedVote.option} · ${formatWhen(battle.lastAcceptedVote.receivedAt)}` : "No accepted pick yet."}</span></div>
       </section>
 
       <section className="challenge-agreement" aria-labelledby="challenge-title">
         <div className="section-heading">
-          <div><p className="eyebrow">Challenge agreement</p><h2 id="challenge-title">The approved list is immutable once proposed.</h2></div>
+          <div><p className="eyebrow">Challenge agreement</p><h2 id="challenge-title">Build the shared list together.</h2></div>
           {canEdit && <button className="button button--secondary" type="button" onClick={() => setEditorOpen((open) => !open)}>{editorOpen ? "Close editor" : challengeSet ? "Edit challenges" : "Set challenges"}</button>}
         </div>
 
@@ -412,21 +485,25 @@ function BattleControls({
           <div className="challenge-editor">
             {options.map((option) => (
               <fieldset key={option.position}>
-                <legend>!vote {option.position}</legend>
+                <legend>!pick {option.position}</legend>
                 <label>Challenge<input value={option.title} maxLength={80} onChange={(event) => updateOption(option.position, "title", event.target.value)} /></label>
                 <label>Exact instruction<input value={option.instruction} maxLength={180} onChange={(event) => updateOption(option.position, "instruction", event.target.value)} /></label>
-                <label>Seconds<input type="number" min="1" max="300" value={option.durationSeconds} onChange={(event) => updateOption(option.position, "durationSeconds", event.target.value)} /></label>
+                <label>Seconds<select value={option.durationSeconds} onChange={(event) => updateOption(option.position, "durationSeconds", event.target.value)}>{DURATION_OPTIONS.map((duration) => <option key={duration} value={duration}>{duration} seconds</option>)}</select></label>
+                {options.length > 2 && <button className="button button--text" type="button" onClick={() => removeOption(option.position)}>Remove</button>}
               </fieldset>
             ))}
-            <label className="duration-field">Voting window (seconds)<input type="number" min="5" max="120" value={votingDurationSeconds} onChange={(event) => setVotingDurationSeconds(event.target.value)} /></label>
-            <button className="button button--primary" type="button" disabled={busy} onClick={() => void submitChallenges()}>Propose this version</button>
+            <div className="challenge-editor__actions">
+              {options.length < 4 && <button className="button button--secondary" type="button" onClick={addOption}>Add challenge</button>}
+              <label className="duration-field">Chat pick window (seconds)<input type="number" min="5" max="120" value={votingDurationSeconds} onChange={(event) => setVotingDurationSeconds(event.target.value)} /></label>
+              <button className="button button--primary" type="button" disabled={busy} onClick={() => void submitChallenges()}>Save changes</button>
+            </div>
           </div>
         ) : challengeSet ? (
           <div className="challenge-list">
-            {challengeSet.options.map((option) => <div key={option.id}><strong>{option.position}. {option.title}</strong><span>{option.durationSeconds}s · {option.instruction}</span></div>)}
-            <p className="quiet-copy">Voting window: {challengeSet.votingDurationSeconds} seconds.</p>
+            {challengeSet.options.map((option) => <div key={option.id}><strong>!pick {option.position} · {option.title}</strong><span>{option.durationSeconds}s · {option.instruction}</span><small>Added by @{option.addedByDisplayName}</small></div>)}
+            <p className="quiet-copy">Chat pick window: {challengeSet.votingDurationSeconds} seconds.</p>
           </div>
-        ) : <Notice tone="warning">Only the host can propose the first three challenges.</Notice>}
+        ) : <Notice tone="warning">Build the shared list once your rival joins.</Notice>}
 
         {challengeSet && !ownApproval && !liveRound && <button className="button button--primary" type="button" disabled={busy} onClick={() => void onApproveChallenges()}>Approve version {challengeSet.version}</button>}
         {challengeSet && ownApproval && <p className="quiet-copy">You approved this exact version. Editing creates a new version and resets both approvals.</p>}
@@ -441,38 +518,58 @@ function BattleControls({
       </section>
 
       <section className="round-control" aria-labelledby="round-title">
-        <div className="section-heading"><div><p className="eyebrow">Round control</p><h2 id="round-title">{round ? round.phase.replace("-", " ") : "Ready for the first vote"}</h2></div>{round && liveRound && <button className="button button--text" type="button" disabled={busy} onClick={() => void onStopRound(round.id)}>Stop round</button>}</div>
-        {!round && battle.role === "host" && <button className="button button--primary" type="button" disabled={busy || !hasRival || !bothApproved || !bothOverlaysConfirmed || !bothChatsConnected} onClick={() => void onOpenVoting()}>Open chat vote</button>}
-        {!round && battle.role !== "host" && <p className="quiet-copy">The host opens voting when setup is complete.</p>}
-        {round?.phase === "voting" && <p className="lede">Chats are choosing. Voting closes at {formatWhen(round.votingDeadlineAt)}.</p>}
+        <div className="section-heading"><div><p className="eyebrow">Round control</p><h2 id="round-title">{round ? round.phase.replace("-", " ") : "Ready for the first pick"}</h2></div>{round && liveRound && <button className={`button ${stopArmed ? "button--primary" : "button--text"}`} type="button" disabled={busy} onClick={() => requestStop(round.id)}>{stopArmed ? "Tap again to stop" : "Stop round"}</button>}</div>
+        {!round && <button className="button button--primary" type="button" disabled={busy || !hasRival || !bothApproved || !bothOverlaysConfirmed || !bothChatsConnected} onClick={() => void onOpenVoting()}>Let chat pick</button>}
+        {!round && <p className="quiet-copy">Either streamer can open the next pick once setup is complete.</p>}
+        {round?.phase === "voting" && <><p className="lede">Chats are choosing. Picks close at {formatWhen(round.votingDeadlineAt)}.</p><button className="button button--secondary" type="button" disabled={busy} onClick={() => void onLockInPicks(round.id)}>Lock in picks</button></>}
         {round?.phase === "voting" && battle.mode === "simulated" && (
           <div className="demo-controls" aria-label="Simulated chat controls">
             <strong>Simulated chat only</strong>
-            <span>Each button replaces one simulated viewer’s vote through the same server vote path. It never reaches Twitch.</span>
+            <span>Each button replaces one simulated viewer’s pick through the same server pick path. It never reaches Twitch.</span>
             {(["host", "guest"] as const).map((sourceRole) => (
               <div key={sourceRole} className="demo-controls__row">
                 <b>@{battle.participants.find((participant) => participant.role === sourceRole)?.displayName ?? sourceRole} chat</b>
-                {([1, 2, 3] as const).map((option) => <button key={option} className="button button--secondary" type="button" disabled={busy} onClick={() => void onSimulateVote(sourceRole, option)}>!vote {option}</button>)}
+                {(challengeSet?.options ?? []).map((option) => <button key={option.position} className="button button--secondary" type="button" disabled={busy} onClick={() => void onSimulateVote(sourceRole, option.position)}>!pick {option.position}</button>)}
               </div>
             ))}
           </div>
         )}
         {round && ["revealed", "countdown", "active", "complete", "no-votes", "stopped"].includes(round.phase) && (
           <div className="assignment-list">
-            {round.assignments.map((assignment) => <div key={assignment.targetUserId}><strong>@{assignment.targetDisplayName}</strong><span>{assignment.title ? `${assignment.title} · ${assignment.durationSeconds}s` : "No restriction selected"}{assignment.clearedAt ? " · Cleared" : ""}</span>{assignment.instruction && <small>{assignment.instruction}</small>}</div>)}
+            {round.assignments.map((assignment) => <div key={assignment.targetUserId}><strong>@{assignment.targetDisplayName}</strong><span>{assignment.title ? `${assignment.title} · ${assignment.durationSeconds}s` : "No pick — play normally"}{assignment.clearedAt ? " · Cleared" : ""}</span>{assignment.instruction && <small>{assignment.instruction}</small>}</div>)}
           </div>
         )}
         {round?.phase === "revealed" && !round.readyUserIds.includes(user.id) && <button className="button button--primary" type="button" disabled={busy} onClick={() => void onReady(round.id)}>I’m ready</button>}
         {round?.phase === "revealed" && round.readyUserIds.includes(user.id) && <><p className="quiet-copy">You are ready. The shared countdown commits when your rival is ready too.</p><button className="button button--secondary" type="button" disabled={busy} onClick={() => void onUnready(round.id)}>Unready</button></>}
         {round?.phase === "revealed" && battle.mode === "simulated" && !round.readyUserIds.includes(battle.participants.find((participant) => participant.role === "guest")?.userId ?? "") && <button className="button button--secondary" type="button" disabled={busy} onClick={() => void onSimulateRivalReady(round.id)}>Simulate rival ready</button>}
-        {round?.phase === "countdown" && <><p className="lede">Restrictions start together at {round.countdownStartsAt ? formatWhen(round.countdownStartsAt) : "the server’s scheduled time"}.</p><button className="button button--secondary" type="button" disabled={busy} onClick={() => void onCancelStart(round.id)}>Cancel start</button></>}
-        {round?.phase === "invalidated" && <Notice tone="warning">Twitch chat disconnected. This round ended and both restrictions were cleared. Reconnecting will not restart it.</Notice>}
-        {round && ["complete", "no-votes", "stopped", "invalidated"].includes(round.phase) && battle.role === "host" && <button className="button button--primary" type="button" disabled={busy || !bothApproved || !bothOverlaysConfirmed || !bothChatsConnected} onClick={() => void onOpenVoting()}>Open next vote</button>}
-        <button className="button button--text button--danger" type="button" disabled={busy} onClick={() => {
-          if (window.confirm("End this battle? This stops any current round, revokes both overlay links, and cannot be undone.")) void onEndBattle();
-        }}>End battle</button>
+        {round?.phase === "countdown" && <><p className="lede">Challenges start together at {round.countdownStartsAt ? formatWhen(round.countdownStartsAt) : "the server’s scheduled time"}.</p><button className="button button--secondary" type="button" disabled={busy} onClick={() => void onCancelStart(round.id)}>Cancel start</button></>}
+        {round?.phase === "invalidated" && <Notice tone="warning">Picks were cancelled because a chat feed dropped before challenges began. Reconnecting does not restart this round.</Notice>}
+        {round?.phase === "stopped" && <Notice tone="warning">{round.stoppedByDisplayName ? `@${round.stoppedByDisplayName} stopped this round. Both challenges are cleared.` : "This round was stopped. Both challenges are cleared."}</Notice>}
+        {round?.phase === "complete" && !round.outcome && <div className="outcome-panel"><strong>Who won?</strong><span>Backseat does not verify gameplay. This score is self-reported.</span><div><button className="button button--secondary" type="button" disabled={busy} onClick={() => void onRecordOutcome(round.id, "host")}>@{battle.participants.find((participant) => participant.role === "host")?.displayName ?? "Host"}</button><button className="button button--secondary" type="button" disabled={busy} onClick={() => void onRecordOutcome(round.id, "guest")}>@{battle.participants.find((participant) => participant.role === "guest")?.displayName ?? "Guest"}</button><button className="button button--secondary" type="button" disabled={busy} onClick={() => void onRecordOutcome(round.id, "draw")}>Draw</button></div></div>}
+        {round && ["complete", "no-votes", "stopped", "invalidated"].includes(round.phase) && <button className="button button--primary" type="button" disabled={busy || !bothApproved || !bothOverlaysConfirmed || !bothChatsConnected} onClick={() => void onOpenVoting()}>Open next pick</button>}
+        <button className={`button button--text button--danger ${endArmed ? "button--primary" : ""}`} type="button" disabled={busy} onClick={requestEndBattle}>{endArmed ? "Tap again to end session" : "End session"}</button>
       </section>
+      <Scoreboard battle={battle} />
     </>
+  );
+}
+
+function Scoreboard({ battle }: { battle: Battle }): ReactNode {
+  const host = battle.participants.find((participant) => participant.role === "host");
+  const guest = battle.participants.find((participant) => participant.role === "guest");
+  const outcomeLabel = (round: Round): string => {
+    if (round.outcome === "host") return `@${host?.displayName ?? "Host"} won`;
+    if (round.outcome === "guest") return `@${guest?.displayName ?? "Guest"} won`;
+    if (round.outcome === "draw") return "Draw";
+    if (round.outcome === "stopped") return "Stopped";
+    return "No result";
+  };
+  return (
+    <section className="scoreboard" aria-labelledby="scoreboard-title">
+      <div className="section-heading"><div><p className="eyebrow">Round history</p><h2 id="scoreboard-title">The score is what you call it.</h2></div><strong>{battle.score.host} – {battle.score.guest}</strong></div>
+      <p className="quiet-copy">@{host?.displayName ?? "Host"} · @{guest?.displayName ?? "Guest"}. Backseat records the result you select; it does not judge gameplay.</p>
+      {battle.history.length > 0 ? <ol className="round-history">{battle.history.slice(0, 6).map((entry) => <li key={entry.id}><span>Round {entry.sequence}</span><strong>{outcomeLabel(entry)}</strong><small>{entry.assignments.map((assignment) => assignment.title ?? "No pick").join(" · ")}</small></li>)}</ol> : <p className="quiet-copy">Finished rounds will appear here.</p>}
+    </section>
   );
 }
 
@@ -603,9 +700,9 @@ function CreatorView({ user, battle, invite, initialOverlayUrl, onRefresh, onSig
       <main className="creator-stage">
         <section className="creator-intro">
           <div>
-            <p className="eyebrow">{user.isDemo ? "Simulated demo creator" : "Connected creator"}</p>
+            <p className="eyebrow">{user.isDemo ? "Simulated demo streamer" : "Connected streamer"}</p>
             <h1>@{user.displayName}</h1>
-            <p>{user.isDemo ? "This isolated demo uses simulated identities and votes. It is not connected to Twitch." : "Backseat is set up for one rival and two distinct Twitch communities."}</p>
+            <p>{user.isDemo ? "This isolated demo uses simulated identities and picks. It is not connected to Twitch." : "Backseat is set up for one rival and two distinct Twitch chats."}</p>
           </div>
           <button className="button button--text" type="button" onClick={() => void onSignOut()}>Sign out</button>
         </section>
@@ -616,11 +713,11 @@ function CreatorView({ user, battle, invite, initialOverlayUrl, onRefresh, onSig
 
           {!battle && !invite && !user.isDemo && (
             <section className="empty-battle" aria-labelledby="create-title">
-              <p className="eyebrow">Start the proof</p>
+              <p className="eyebrow">Start your session</p>
               <h2 id="create-title">Create a battle, then invite one rival.</h2>
-              <p>Creating a battle does not open voting or simulate chat. It creates the host seat and a short-lived, single-use invitation.</p>
+              <p>Creating a battle does not open picks or simulate chat. It creates the host seat and a short-lived, single-use invitation.</p>
               <button className="button button--primary" type="button" disabled={isCreating} onClick={() => void createBattle()}>
-                {isCreating ? "Creating…" : "Create battle"}
+                {isCreating ? "Creating…" : "Invite your rival"}
               </button>
             </section>
           )}
@@ -639,7 +736,7 @@ function CreatorView({ user, battle, invite, initialOverlayUrl, onRefresh, onSig
                 <section className="invite-panel" aria-labelledby="invite-panel-title">
                   <p className="eyebrow">Host setup</p>
                   <h2 id="invite-panel-title">Invite your rival.</h2>
-                  <p>Only the invited creator can claim this guest seat. If you need a new link, rotating it revokes the previous invitation.</p>
+                  <p>Only the invited streamer can claim this guest seat. If you need a new link, rotating it revokes the previous invitation.</p>
                   {inviteUrl && <CopyControl value={inviteUrl} label="battle-invitation-link" />}
                   <button className="button button--secondary" type="button" disabled={isRotatingInvitation} onClick={() => void rotateInvitation()}>
                     {isRotatingInvitation ? "Creating invitation…" : inviteUrl ? "Rotate invitation link" : "Create fresh invitation link"}
@@ -659,7 +756,9 @@ function CreatorView({ user, battle, invite, initialOverlayUrl, onRefresh, onSig
                 onReady={(roundId) => mutateBattle(`/api/battles/current/rounds/${roundId}/ready`)}
                 onUnready={(roundId) => mutateBattle(`/api/battles/current/rounds/${roundId}/unready`)}
                 onCancelStart={(roundId) => mutateBattle(`/api/battles/current/rounds/${roundId}/cancel-start`)}
+                onLockInPicks={(roundId) => mutateBattle(`/api/battles/current/rounds/${roundId}/lock-picks`, { stateVersion: battle.stateVersion })}
                 onStopRound={(roundId) => mutateBattle(`/api/battles/current/rounds/${roundId}/stop`)}
+                onRecordOutcome={(roundId, outcome) => mutateBattle(`/api/battles/current/rounds/${roundId}/outcome`, { outcome })}
                 onEndBattle={() => mutateBattle("/api/battles/current/end", { stateVersion: battle.stateVersion })}
                 onSimulateVote={(sourceRole, option) => mutateBattle("/api/demo/votes", { sourceRole, option })}
                 onSimulateRivalReady={(roundId) => mutateBattle(`/api/demo/rounds/${roundId}/rival-ready`)}
@@ -688,19 +787,19 @@ function OverlayTimer({ until }: { until: string }): ReactNode {
 function overlayPhaseCopy(snapshot: OverlaySnapshot): { heading: string; detail: string } {
   const phase = snapshot.phase;
   switch (phase) {
-    case "waiting-for-rival": return { heading: "Waiting for rival", detail: "Both creators must connect." };
+    case "waiting-for-rival": return { heading: "Waiting for rival", detail: "Both streamers must connect." };
     case "setup": return snapshot.participants.every((participant) => participant.chatConnected)
       ? { heading: "Setup in progress", detail: "Agree on challenges and confirm your overlays." }
       : { heading: "Waiting for Twitch chat", detail: "Voting stays closed until both chat feeds reconnect." };
-    case "ready-for-voting": return { heading: "Ready for chat", detail: "Creators can open the next vote." };
-    case "voting": return { heading: "Chats are choosing", detail: "Vote in Twitch chat." };
-    case "revealed": return { heading: "Chat has chosen", detail: "Waiting for both creators." };
-    case "countdown": return { heading: "Challenges locked", detail: "Restrictions begin together." };
-    case "active": return { heading: "Challenges active", detail: "Follow the restrictions below." };
-    case "complete": return { heading: "Restrictions ended", detail: "Play normally." };
-    case "no-votes": return { heading: "No votes this time", detail: "No restrictions will start." };
-    case "stopped": return { heading: "Round stopped", detail: "Restrictions are cleared." };
-    case "invalidated": return { heading: "Connection lost", detail: "This round ended. Restrictions are cleared." };
+    case "ready-for-voting": return { heading: "Ready for chat", detail: "Either streamer can open the next pick." };
+    case "voting": return { heading: "Chats are choosing", detail: "Use !pick in Twitch chat." };
+    case "revealed": return { heading: "Chat has chosen", detail: "Waiting for both streamers." };
+    case "countdown": return { heading: "Challenges locked", detail: "Challenges begin together." };
+    case "active": return { heading: "Challenges active", detail: "The round is live." };
+    case "complete": return { heading: "Challenges ended", detail: "Play normally." };
+    case "no-votes": return { heading: "No picks this time", detail: "Play normally." };
+    case "stopped": return { heading: "Round stopped", detail: "Challenges are cleared." };
+    case "invalidated": return { heading: "Picks cancelled", detail: "Chat disconnected before the round began." };
   }
 }
 
@@ -815,7 +914,7 @@ function OverlayApp(): ReactNode {
             <div className="overlay-strip__brand"><Logo compact /><span className="overlay-phase">{phaseCopy?.heading}</span></div>
           <div className="overlay-creator">
             <CreatorMark name={host?.displayName ?? "?"} role="host" />
-              <div><span>@{host?.displayName ?? "Host"}</span><strong>{snapshot.phase === "voting" ? "Chat chooses rival" : "Creator"}</strong></div>
+              <div><span>@{host?.displayName ?? "Host"}</span><strong>{snapshot.phase === "voting" ? "Chat chooses rival" : "Streamer"}</strong></div>
           </div>
             <div className="overlay-state">
               <strong>{phaseCopy?.heading}</strong>
@@ -824,12 +923,12 @@ function OverlayApp(): ReactNode {
               {snapshot.phase === "countdown" && snapshot.countdownStartsAt && <OverlayTimer until={snapshot.countdownStartsAt} />}
           </div>
           <div className="overlay-creator overlay-creator--guest">
-              <div><span>@{guest?.displayName ?? "Rival"}</span><strong>{snapshot.phase === "voting" ? "Chat chooses rival" : "Creator"}</strong></div>
+              <div><span>@{guest?.displayName ?? "Rival"}</span><strong>{snapshot.phase === "voting" ? "Chat chooses rival" : "Streamer"}</strong></div>
             <CreatorMark name={guest?.displayName ?? "?"} role="guest" />
           </div>
             {snapshot.phase === "voting" && (
               <div className="overlay-commands" aria-label="Twitch voting commands">
-                {snapshot.challenges.map((challenge) => <span key={challenge.position}><b>!vote {challenge.position}</b> {challenge.title} · {challenge.durationSeconds}s</span>)}
+                {snapshot.challenges.map((challenge) => <span key={challenge.position}><b>!pick {challenge.position}</b> {challenge.title} · {challenge.durationSeconds}s</span>)}
               </div>
             )}
             {snapshot.restrictions.length > 0 && snapshot.phase !== "voting" && (
@@ -905,7 +1004,7 @@ export function App(): ReactNode {
 
   if (loading) {
     return (
-      <PageShell><main className="loading-stage" aria-live="polite"><p>Checking your secure creator session…</p></main></PageShell>
+      <PageShell><main className="loading-stage" aria-live="polite"><p>Checking your secure streamer session…</p></main></PageShell>
     );
   }
 
@@ -919,7 +1018,7 @@ export function App(): ReactNode {
 
   if (!user) {
     const oauthMessage = demoError ?? (initialOAuthResult.current === "denied"
-      ? "Twitch authorization was cancelled or could not be verified. No creator session was created."
+      ? "Twitch authorization was cancelled or could not be verified. No streamer session was created."
       : initialOAuthResult.current === "failed"
         ? initialOAuthReason.current === "token-exchange"
           ? "Twitch rejected Backseat’s server credentials or callback settings. In Render, confirm the current client secret belongs to the same Twitch app as the client ID, then confirm Twitch has this exact callback URL: https://backseat-2znp.onrender.com/auth/twitch/callback."

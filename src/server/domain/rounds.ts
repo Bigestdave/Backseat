@@ -11,18 +11,21 @@ export const ROUND_PHASES = [
 
 export type RoundPhase = (typeof ROUND_PHASES)[number];
 export type CreatorRole = "host" | "guest";
-export type VoteOption = 1 | 2 | 3;
+export type VoteOption = 1 | 2 | 3 | 4;
 
 export type ChallengeDraft = {
   position: VoteOption;
   title: string;
   instruction: string;
   durationSeconds: number;
+  // An existing option can retain the streamer who first added it when either
+  // streamer publishes the next immutable version of the shared list.
+  sourceOptionId?: string;
 };
 
 export type RoundReadiness = Partial<Record<CreatorRole, Date>>;
 
-export type VoteTally = Record<VoteOption, number>;
+export type VoteTally = Partial<Record<VoteOption, number>>;
 
 export type VoteResolution =
   | { kind: "no-votes" }
@@ -72,21 +75,21 @@ function copyReadiness(readiness: RoundReadiness): RoundReadiness {
 }
 
 export function validateChallengeDrafts(options: readonly ChallengeDraft[]): void {
-  if (options.length !== 3) {
-    throw new DomainRuleError("A challenge set must contain exactly three options.");
+  if (options.length < 2 || options.length > 4) {
+    throw new DomainRuleError("A challenge set must contain between two and four options.");
   }
 
   const seen = new Set<number>();
   for (const option of options) {
-    if (!Number.isInteger(option.position) || option.position < 1 || option.position > 3 || seen.has(option.position)) {
-      throw new DomainRuleError("Challenge options must use positions 1, 2, and 3 exactly once.");
+    if (!Number.isInteger(option.position) || option.position < 1 || option.position > options.length || seen.has(option.position)) {
+      throw new DomainRuleError("Challenge options must use consecutive positions beginning at 1.");
     }
     seen.add(option.position);
     if (!option.title.trim() || !option.instruction.trim()) {
       throw new DomainRuleError("Every challenge needs a title and an exact instruction.");
     }
-    if (!Number.isInteger(option.durationSeconds) || option.durationSeconds < 1 || option.durationSeconds > 300) {
-      throw new DomainRuleError("Challenge durations must be whole seconds between 1 and 300.");
+    if (![10, 20, 30, 60].includes(option.durationSeconds)) {
+      throw new DomainRuleError("Challenge durations must be 10, 20, 30, or 60 seconds.");
     }
   }
 }
@@ -141,10 +144,11 @@ export function resolveVoteTally(
   tally: VoteTally,
   chooseTiedIndex: (exclusiveMaximum: number) => number
 ): VoteResolution {
-  const highest = Math.max(tally[1], tally[2], tally[3]);
+  const availableOptions = ([1, 2, 3, 4] as const).filter((option) => Object.hasOwn(tally, option));
+  const highest = Math.max(0, ...availableOptions.map((option) => tally[option] ?? 0));
   if (highest === 0) return { kind: "no-votes" };
 
-  const tiedOptions = ([1, 2, 3] as const).filter((option) => tally[option] === highest);
+  const tiedOptions = availableOptions.filter((option) => (tally[option] ?? 0) === highest);
   const index = tiedOptions.length === 1 ? 0 : chooseTiedIndex(tiedOptions.length);
   if (!Number.isInteger(index) || index < 0 || index >= tiedOptions.length) {
     throw new DomainRuleError("Tie resolver returned an invalid option index.");

@@ -17,12 +17,14 @@ export type RoutedVote = {
   battleId: string;
   targetUserId: string;
   targetDisplayName: string;
-  option: 1 | 2 | 3;
+  option: 1 | 2 | 3 | 4;
 };
 
-export function parseVoteCommand(text: string): 1 | 2 | 3 | null {
-  const match = /^!vote\s+([1-3])\s*$/i.exec(text.trim());
-  return match ? (Number(match[1]) as 1 | 2 | 3) : null;
+export function parseVoteCommand(text: string): 1 | 2 | 3 | 4 | null {
+  // !pick is the visible Backseat command. !vote remains a quiet alias so a
+  // previously shared command does not suddenly stop working mid-session.
+  const match = /^!(?:pick|vote)\s+([1-4])\s*$/i.exec(text.trim());
+  return match ? (Number(match[1]) as 1 | 2 | 3 | 4) : null;
 }
 
 export function routeVote(message: ChatMessage, battle: BattleRoutingContext): RoutedVote | null {

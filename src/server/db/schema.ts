@@ -76,6 +76,7 @@ export const challengeOptions = pgTable("challenge_options", {
   title: text("title").notNull(),
   instruction: text("instruction").notNull(),
   durationSeconds: integer("duration_seconds").notNull(),
+  addedByUserId: uuid("added_by_user_id").notNull().references(() => users.id),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull()
 }, (table) => [uniqueIndex("challenge_options_version_position").on(table.challengeSetVersionId, table.position)]);
 
@@ -99,6 +100,8 @@ export const rounds = pgTable("rounds", {
   activeAt: timestamp("active_at", { withTimezone: true }),
   completedAt: timestamp("completed_at", { withTimezone: true }),
   terminalReason: text("terminal_reason"),
+  stoppedByUserId: uuid("stopped_by_user_id").references(() => users.id),
+  outcome: text("outcome"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull()
 }, (table) => [uniqueIndex("rounds_battle_sequence").on(table.battleId, table.sequence)]);

@@ -18,13 +18,24 @@ describe("challenge-set rules", () => {
     expect(() => validateChallengeDrafts(DEFAULT_CHALLENGES)).not.toThrow();
   });
 
-  it("requires exactly three unique vote positions", () => {
-    expect(() => validateChallengeDrafts(DEFAULT_CHALLENGES.slice(0, 2))).toThrow(DomainRuleError);
+  it("accepts two to four consecutive pick positions", () => {
+    expect(() => validateChallengeDrafts(DEFAULT_CHALLENGES.slice(0, 2))).not.toThrow();
+    expect(() => validateChallengeDrafts([
+      ...DEFAULT_CHALLENGES,
+      { position: 4, title: "One hand only", instruction: "Use one hand.", durationSeconds: 30 }
+    ])).not.toThrow();
+  });
+
+  it("rejects non-consecutive positions and unsupported durations", () => {
     expect(() => validateChallengeDrafts([
       DEFAULT_CHALLENGES[0],
       { ...DEFAULT_CHALLENGES[1], position: 1 },
       DEFAULT_CHALLENGES[2]
-    ])).toThrow("positions 1, 2, and 3 exactly once");
+    ])).toThrow("consecutive positions");
+    expect(() => validateChallengeDrafts([
+      DEFAULT_CHALLENGES[0],
+      { ...DEFAULT_CHALLENGES[1], durationSeconds: 25 }
+    ])).toThrow("10, 20, 30, or 60");
   });
 
   it("requires both creators to approve the same immutable version", () => {
