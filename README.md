@@ -1,71 +1,107 @@
-# Backseat — Twitch chat backs the rival
+# Backseat — Twitch chat backseats the rival
 
-Backseat is a two-creator Twitch format: each creator’s community chooses a short, pre-approved challenge for the **other** creator.
+> **Don’t trust this README. Check it.** Every claim below has a command or source file you can check in about two minutes, with no Twitch account needed. Anything not proven yet is marked **Not yet proven**.
 
-> **Verification-first:** this README is designed to be checked, not trusted. Every claim below either has a source pointer and a local check, or is explicitly marked **unverified**. The simulated demo is never presented as Twitch activity.
+**In one line:** Backseat gives each Twitch chat a real say in a two-streamer match, but only over the rival, and only from challenges both streamers approved.
 
-**One-line description:** Backseat lets two Twitch communities playfully backseat the rival, through one server-enforced vote path and a read-only OBS overlay.
+- **Live app:** <https://backseat-2znp.onrender.com/> (Render’s Free plan can take about a minute to wake after inactivity.)
+- **Demo video:** _Add the public or unlisted YouTube URL after recording._
+- **Built with:** OpenAI Codex — main session `01a184e9-88ae-7191-ac0a-be3b4980e1dc`
 
-- Live demo: <https://backseat-2znp.onrender.com/>
-- Source: <https://github.com/Bigestdave/Backseat>
+## The problem
+
+Streamers love playing with other streamers, and chat always has something to say. Most of that energy is ignored or turns into spam because it has no shared, fair way to affect the action. Backseat gives both communities a small, visible role without letting either community sabotage its own streamer.
 
 ## What it does
 
-1. Two creators authenticate with Twitch, then create and join a private battle.
-2. Both approve the exact same three-option challenge list.
-3. Both set up their own private OBS Browser Source and confirm it.
+1. Two creators sign in with Twitch. One creates a private battle invitation; the other accepts it.
+2. Both approve the exact same list of three challenges.
+3. Each adds a private, read-only OBS overlay and confirms it.
 4. Each chat votes with `!vote 1`, `!vote 2`, or `!vote 3`.
-5. A vote from Creator A’s chat targets Creator B; a vote from Creator B’s chat targets Creator A.
-6. The server reveals the chosen challenges, waits for both creators to be ready, runs a shared countdown, and expires the restrictions.
+5. A vote in Creator A’s chat picks a challenge for **Creator B**, and the other way round.
+6. The server reveals both challenges, waits for both creators to be ready, runs one shared three-second countdown, then ends each challenge on its own timer.
 
-The browser is not trusted to decide any of this. The backend owns membership, challenge approval, target routing, vote timing, round transitions, and overlay access.
+Either creator can stop a round. Backseat shows the challenges and timers. **It does not control the game or check whether players follow the rules.** The browser decides nothing here: the server owns membership, approval, routing, timing, and overlay access.
 
-## Fast local audit
+## Two-minute check — no Twitch account needed
 
-The application requires Node 22+ (the deployment version is pinned in [`.node-version`](.node-version)). After installing dependencies, these are the quick checks:
+Requires Node 22+.
 
 ```bash
-npm run typecheck
-npm test
-npm run build
-npm audit --omit=dev
+git clone https://github.com/Bigestdave/Backseat && cd Backseat
+npm ci
+npm run typecheck       # passes
+npm test                # 39 tests pass in 6 files
+npm run build           # client and server build
+npm audit --omit=dev    # 3 moderate findings, explained below
 ```
 
-Expected results at the latest checked commit:
+Last checked on 2 November 2026 at code commit [`7dbf222`](https://github.com/Bigestdave/Backseat/commit/7dbf222).
 
-- TypeScript type check passes.
-- All **39** unit tests pass.
-- The production client and Fastify server build successfully.
-- The production dependency audit is shown transparently below; it currently reports three moderate upstream dependency findings.
+## Claims you can check
 
-## Claims you can verify
+| # | Claim | How to check | What you should see |
+| --- | --- | --- | --- |
+| 1 | Only `!vote 1`, `!vote 2`, and `!vote 3` count | `npm test -- chat-routing` | `parseVoteCommand` tests: malformed commands and `!pick 1` are rejected. |
+| 2 | A vote goes to the rival, not your own streamer | `npm test -- chat-routing` | `routes a host-channel vote to the guest using stable Twitch IDs` and `routes a guest-channel vote to the host`. |
+| 3 | Creators cannot vote in their own battle | `npm test -- chat-routing` | `excludes the participating %s creator from voting`, run for both creators. |
+| 4 | Chats outside the battle are ignored | `npm test -- chat-routing` | `ignores votes from a channel outside the two creators' battle`. |
+| 5 | Both creators must approve the same list | `npm test -- rounds` | `requires both creators to approve the same immutable version`. |
+| 6 | A chat disconnect cancels the live round | `npm test -- rounds` | `invalidates every live phase when chat disconnects`. |
+| 7 | One shared countdown is set by the server | `npm test -- rounds` | `commits one shared server countdown when the second creator is ready`. |
+| 8 | No votes means no made-up challenge | `npm test -- rounds` | `never invents a challenge when a community has no votes`. |
+| 9 | A tie is broken once by the server | `npm test -- rounds` | `resolves a tie once using the server-supplied random decision`. |
+| 10 | The overlay never gets voter names or votes | `npm test -- overlay-state` | `shows public assignments but never vote or viewer fields`. |
+| 11 | A viewer cannot switch teams mid-battle | Read `battle_team_locks` in [`battle-service.ts`](src/server/services/battle-service.ts) | Checked in code and the database schema. **No dedicated unit test yet.** |
 
-| Claim | How to check it | What to expect |
-| --- | --- | --- |
-| Only exact vote commands are accepted | Run `npm test -- chat-routing` or inspect [`chat-routing.ts`](src/server/services/chat-routing.ts) | `!vote 1`, `!vote 2`, and `!vote 3` are accepted; malformed commands and `!pick 1` are rejected. |
-| Chat votes target the rival, not the streamer whose chat sent them | Run `npm test -- chat-routing` | A host-channel vote resolves to the guest; a guest-channel vote resolves to the host, using stable Twitch IDs. |
-| Creators cannot vote in their own battle | Run `npm test -- chat-routing` | Messages sent by either participating creator are ignored. |
-| The overlay does not receive voter identities or vote data | Run `npm test -- overlay-state` or inspect [`overlay-state.ts`](src/server/services/overlay-state.ts) | The public snapshot contains challenge and restriction state only; it has no voter or vote fields. |
-| Both creators must approve the same challenge list | Run `npm test -- rounds` | A challenge set is only approved after both creator roles approve the same immutable version. |
-| A chat disconnect invalidates a live round | Run `npm test -- rounds` and inspect [`battle-service.ts`](src/server/services/battle-service.ts) | Voting, revealed, countdown, and active rounds can transition to `invalidated`; assignments are cleared. |
-| Simulated activity cannot masquerade as Twitch activity | Start the in-app demo and inspect `/api/demo/*` routes in [`server.ts`](src/server/server.ts) | Demo identities are prefixed `demo:` and the UI visibly labels its controls and overlay **Simulated**. |
+Simulated mode is separate: `/api/demo/*` in [`server.ts`](src/server/server.ts) uses `demo:` identities only, and the UI labels it **Simulated**. It never calls Twitch.
 
-## Real versus simulated
+## Try to make a chat hurt its own streamer
 
-Backseat has two deliberately separate paths:
+That is the one thing Backseat must never allow. The current checks are:
 
-- **Real battle:** Twitch OAuth, EventSub chat-message subscriptions, two independently authorized creator accounts, and private overlay credentials.
-- **Simulated demo:** isolated `demo:` users and simulated votes for rehearsing the product flow. These actions never call Twitch and must be described as **Simulated votes** in any recording.
+- **A creator votes in the battle:** ignored (claim 3).
+- **A viewer votes in both chats:** locked to their first team (claim 11).
+- **A chat outside the battle votes:** ignored (claim 4).
+- **Twitch sends the same message twice:** deduplicated by delivery and message ID.
+- **A viewer spams votes:** one vote per viewer per round; a new vote replaces the old one.
 
-### Live integration status
+Found another route? Open an issue. We would rather know.
+
+## What’s proven and what is not yet
 
 | Area | Status |
 | --- | --- |
-| OAuth, EventSub, rival-routing, overlay, and round logic | Implemented in the server code |
-| Type checks, unit tests, and production build | Verified locally |
-| Render health endpoint and Supabase schema migration | Configured for the live deployment |
-| Real Twitch chat vote from a third viewer account | **Requires the controlled test below before it is claimed as proven** |
-| OBS Browser Source display | **Requires manual OBS verification** |
+| Vote routing, round rules, and overlay privacy | **Proven** by 39 passing unit tests |
+| Type check and production build | **Proven** locally |
+| Render health endpoint | **Responding** with `{"status":"ok"}` |
+| Supabase-backed deployment | **Configured**; migration runs during startup |
+| Real `!vote` from a third Twitch account reaching the rival | **Not yet proven** — update with the video timestamp after the controlled test |
+| OBS Browser Source display | **Not yet proven** — update with the video timestamp after recording |
+| Database behaviour under real concurrent load | **Not tested** beyond unit tests |
+
+## Questions you might have
+
+**Can players just ignore the challenge?**
+Yes. Backseat is a public dare between two streamers, with both chats watching. It does not control a game or determine whether a player follows the rule. That keeps it game-agnostic.
+
+**Why chat commands instead of a Twitch Extension or voting site?**
+Every viewer can already type in chat. There is nothing extra to install and no new site or viewer login to manage.
+
+**Why cancel the whole round when chat drops?**
+Twitch does not resend messages missed during a disconnect. A half-counted vote is not fair, so Backseat invalidates the round rather than pretending the result is complete.
+
+**What are the three audit findings?**
+They are moderate denial-of-service advisories in `minimatch`, pulled in through `glob` by `@fastify/static`. The automated audit remedy proposes a breaking package change, so the finding is disclosed rather than blindly applied or hidden.
+
+**Why is the first load slow?**
+Render’s Free plan sleeps when idle. While it is asleep, no chat is collected. On wake, Backseat clears stale state and reconnects before a vote can open.
+
+**Is it production-ready?**
+Not yet. A creator-facing data deletion flow and automatic data-retention job are still a hardening milestone.
+
+**How was Codex used?**
+Codex turned the product handoff and UI designs into this app: the battle flow, invitations, approvals, chat routing, and overlay. It also helped track down deployment, migration, and timestamp-persistence bugs on the hosted app, then ran type checks, tests, and builds after each repair.
 
 ## Controlled Twitch proof
 
@@ -155,10 +191,6 @@ Backseat is intentionally narrow. It is a two-creator Twitch interaction, not a 
 - It does not claim production-grade deletion/retention tooling; that is a hardening milestone.
 - A simulated vote is not a Twitch vote and is labelled as such.
 - A live OAuth, EventSub, chat, or OBS claim belongs in the demo only after the controlled test succeeds.
-
-### Dependency audit note
-
-`npm audit --omit=dev` currently reports three moderate findings through the `glob`/`minimatch` dependency path used by `@fastify/static`. The audit tool’s automatic remedy proposes a breaking package change, so it has not been applied blindly during the hackathon. The current audit output is intentionally left reproducible with the command above rather than hidden behind a claim of zero vulnerabilities.
 
 ## How OpenAI Codex was used
 
