@@ -1,6 +1,7 @@
 import { randomInt, randomUUID } from "node:crypto";
 import type { TransactionSql } from "postgres";
 import type { Database } from "../db/client";
+import { timestamp } from "../db/timestamp";
 import { FixedWindowRateLimiter } from "../security/rate-limit";
 import {
   DEFAULT_CHALLENGES,
@@ -556,8 +557,8 @@ export class BattleService {
     const due = await this.database.client<{ id: string; battleId: string }[]>`
       SELECT id, battle_id AS "battleId"
       FROM rounds
-      WHERE (phase = 'voting' AND voting_deadline_at <= ${now})
-        OR (phase = 'countdown' AND countdown_starts_at <= ${now})
+      WHERE (phase = 'voting' AND voting_deadline_at <= ${timestamp(this.database.client, now)})
+        OR (phase = 'countdown' AND countdown_starts_at <= ${timestamp(this.database.client, now)})
         OR phase = 'active'
       ORDER BY updated_at ASC
       LIMIT 100

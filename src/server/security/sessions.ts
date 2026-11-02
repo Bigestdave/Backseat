@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { AppConfig } from "../config";
 import type { Database } from "../db/client";
+import { timestamp } from "../db/timestamp";
 import { randomSecret, sha256 } from "./crypto";
 import { clearCookie, secureCookieOptions } from "./http";
 
@@ -27,7 +28,10 @@ export async function createCreatorSession(
   const expiresAt = new Date(now.getTime() + 1000 * 60 * 60 * 24 * 14);
   await database.client`
     INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at)
-    VALUES (${randomUUID()}, ${userId}, ${sha256(token)}, ${expiresAt}, ${now})
+    VALUES (
+      ${randomUUID()}, ${userId}, ${sha256(token)},
+      ${timestamp(database.client, expiresAt)}, ${timestamp(database.client, now)}
+    )
   `;
   reply.setCookie(CREATOR_SESSION_COOKIE, token, {
     ...secureCookieOptions(config),

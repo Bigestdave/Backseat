@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { decrypt, encrypt } from "../security/crypto";
 import type { AppConfig } from "../config";
 import type { Database } from "../db/client";
+import { timestamp } from "../db/timestamp";
 
 export const REQUIRED_TWITCH_SCOPES = ["user:read:chat"] as const;
 
@@ -186,7 +187,10 @@ export class TwitchTokenService {
     const expiresAt = new Date(now.getTime() + token.expires_in * 1000);
     const [user] = await this.database.client<{ id: string }[]>`
       INSERT INTO users (id, twitch_id, login, display_name, created_at, updated_at)
-      VALUES (${randomUUID()}, ${validation.user_id}, ${validation.login}, ${validation.login}, ${now}, ${now})
+      VALUES (
+        ${randomUUID()}, ${validation.user_id}, ${validation.login}, ${validation.login},
+        ${timestamp(this.database.client, now)}, ${timestamp(this.database.client, now)}
+      )
       ON CONFLICT (twitch_id) DO UPDATE
         SET login = EXCLUDED.login, display_name = EXCLUDED.display_name, updated_at = EXCLUDED.updated_at
       RETURNING id
@@ -197,7 +201,8 @@ export class TwitchTokenService {
       ) VALUES (
         ${user.id}, ${encrypt(token.access_token, this.config.TOKEN_ENCRYPTION_KEY)},
         ${encrypt(token.refresh_token, this.config.TOKEN_ENCRYPTION_KEY)},
-        ${JSON.stringify(validation.scopes)}::jsonb, ${expiresAt}, ${now}, NULL, ${now}
+        ${JSON.stringify(validation.scopes)}::jsonb, ${timestamp(this.database.client, expiresAt)},
+        ${timestamp(this.database.client, now)}, NULL, ${timestamp(this.database.client, now)}
       ) ON CONFLICT (user_id) DO UPDATE SET
         access_token_ciphertext = EXCLUDED.access_token_ciphertext,
         refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext,
