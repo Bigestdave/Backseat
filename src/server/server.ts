@@ -8,6 +8,7 @@ import { z } from "zod";
 import type { OverlaySnapshot } from "../shared/contracts";
 import type { AppConfig } from "./config";
 import { createDatabase } from "./db/client";
+import { timestamp } from "./db/timestamp";
 import { constantTimeEquals, randomSecret, sha256 } from "./security/crypto";
 import { assertTrustedOrigin, clearCookie, secureCookieOptions } from "./security/http";
 import { FixedWindowRateLimiter } from "./security/rate-limit";
@@ -378,28 +379,31 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
       await transaction`
         INSERT INTO users (id, twitch_id, login, display_name, created_at, updated_at)
         VALUES
-          (${hostId}, ${`demo:${battleId}:host`}, 'demo-host', 'DemoHost', ${now}, ${now}),
-          (${guestId}, ${`demo:${battleId}:guest`}, 'demo-guest', 'DemoRival', ${now}, ${now})
+          (${hostId}, ${`demo:${battleId}:host`}, 'demo-host', 'DemoHost', ${timestamp(transaction, now)}, ${timestamp(transaction, now)}),
+          (${guestId}, ${`demo:${battleId}:guest`}, 'demo-guest', 'DemoRival', ${timestamp(transaction, now)}, ${timestamp(transaction, now)})
       `;
       await transaction`
         INSERT INTO battles (
           id, host_user_id, guest_user_id, mode, status, current_challenge_set_version_id, state_version, created_at, updated_at
-        ) VALUES (${battleId}, ${hostId}, ${guestId}, 'simulated', 'integration-proof', ${versionId}, 5, ${now}, ${now})
+        ) VALUES (
+          ${battleId}, ${hostId}, ${guestId}, 'simulated', 'integration-proof', ${versionId}, 5,
+          ${timestamp(transaction, now)}, ${timestamp(transaction, now)}
+        )
       `;
       await transaction`
         INSERT INTO battle_members (battle_id, user_id, role, overlay_confirmed_at, chat_connected_at, created_at)
         VALUES
-          (${battleId}, ${hostId}, 'host', ${now}, ${now}, ${now}),
-          (${battleId}, ${guestId}, 'guest', ${now}, ${now}, ${now})
+          (${battleId}, ${hostId}, 'host', ${timestamp(transaction, now)}, ${timestamp(transaction, now)}, ${timestamp(transaction, now)}),
+          (${battleId}, ${guestId}, 'guest', ${timestamp(transaction, now)}, ${timestamp(transaction, now)}, ${timestamp(transaction, now)})
       `;
       await transaction`
         INSERT INTO active_battle_members (user_id, battle_id, created_at)
-        VALUES (${hostId}, ${battleId}, ${now}), (${guestId}, ${battleId}, ${now})
+        VALUES (${hostId}, ${battleId}, ${timestamp(transaction, now)}), (${guestId}, ${battleId}, ${timestamp(transaction, now)})
       `;
       await transaction`
         INSERT INTO challenge_set_versions (
           id, battle_id, version, proposed_by_user_id, voting_duration_seconds, created_at
-        ) VALUES (${versionId}, ${battleId}, 1, ${hostId}, 30, ${now})
+        ) VALUES (${versionId}, ${battleId}, 1, ${hostId}, 30, ${timestamp(transaction, now)})
       `;
       for (const option of DEFAULT_CHALLENGES) {
         await transaction`
@@ -407,19 +411,19 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
             id, challenge_set_version_id, position, title, instruction, duration_seconds, created_at
           ) VALUES (
             ${optionIds.get(option.position)!}, ${versionId}, ${option.position}, ${option.title},
-            ${option.instruction}, ${option.durationSeconds}, ${now}
+            ${option.instruction}, ${option.durationSeconds}, ${timestamp(transaction, now)}
           )
         `;
       }
       await transaction`
         INSERT INTO challenge_set_approvals (challenge_set_version_id, user_id, approved_at)
-        VALUES (${versionId}, ${hostId}, ${now}), (${versionId}, ${guestId}, ${now})
+        VALUES (${versionId}, ${hostId}, ${timestamp(transaction, now)}), (${versionId}, ${guestId}, ${timestamp(transaction, now)})
       `;
       await transaction`
         INSERT INTO overlay_credentials (id, owner_user_id, battle_id, secret_hash, expires_at, created_at)
         VALUES
-          (${randomUUID()}, ${hostId}, ${battleId}, ${sha256(hostOverlaySecret)}, ${expiresAt}, ${now}),
-          (${randomUUID()}, ${guestId}, ${battleId}, ${sha256(guestOverlaySecret)}, ${expiresAt}, ${now})
+          (${randomUUID()}, ${hostId}, ${battleId}, ${sha256(hostOverlaySecret)}, ${timestamp(transaction, expiresAt)}, ${timestamp(transaction, now)}),
+          (${randomUUID()}, ${guestId}, ${battleId}, ${sha256(guestOverlaySecret)}, ${timestamp(transaction, expiresAt)}, ${timestamp(transaction, now)})
       `;
     });
     await createCreatorSession(database, reply, config, hostId);
@@ -476,15 +480,15 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     await database.client.begin(async (transaction) => {
       await transaction`
         INSERT INTO battles (id, host_user_id, guest_user_id, mode, status, created_at, updated_at)
-        VALUES (${battleId}, ${user.id}, NULL, 'real', 'setup', ${now}, ${now})
+        VALUES (${battleId}, ${user.id}, NULL, 'real', 'setup', ${timestamp(transaction, now)}, ${timestamp(transaction, now)})
       `;
       await transaction`
         INSERT INTO battle_members (battle_id, user_id, role, created_at)
-        VALUES (${battleId}, ${user.id}, 'host', ${now})
+        VALUES (${battleId}, ${user.id}, 'host', ${timestamp(transaction, now)})
       `;
       const activeMembership = await transaction<{ userId: string }[]>`
         INSERT INTO active_battle_members (user_id, battle_id, created_at)
-        VALUES (${user.id}, ${battleId}, ${now})
+        VALUES (${user.id}, ${battleId}, ${timestamp(transaction, now)})
         ON CONFLICT (user_id) DO NOTHING
         RETURNING user_id AS "userId"
       `;
@@ -493,7 +497,10 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
       }
       await transaction`
         INSERT INTO battle_invitations (id, battle_id, secret_hash, expires_at, created_at)
-        VALUES (${randomUUID()}, ${battleId}, ${sha256(invitationSecret)}, ${new Date(now.getTime() + 7 * DAY)}, ${now})
+        VALUES (
+          ${randomUUID()}, ${battleId}, ${sha256(invitationSecret)},
+          ${timestamp(transaction, new Date(now.getTime() + 7 * DAY))}, ${timestamp(transaction, now)}
+        )
       `;
     });
     await eventSub.reconcile();
@@ -519,12 +526,15 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
       `;
       if (!lockedBattle) throw apiError("This battle can no longer accept a rival.", 409);
       await transaction`
-        UPDATE battle_invitations SET revoked_at = COALESCE(revoked_at, ${now})
+        UPDATE battle_invitations SET revoked_at = COALESCE(revoked_at, ${timestamp(transaction, now)})
         WHERE battle_id = ${battle.id} AND consumed_at IS NULL AND revoked_at IS NULL
       `;
       await transaction`
         INSERT INTO battle_invitations (id, battle_id, secret_hash, expires_at, created_at)
-        VALUES (${randomUUID()}, ${battle.id}, ${sha256(invitationSecret)}, ${new Date(now.getTime() + 7 * DAY)}, ${now})
+        VALUES (
+          ${randomUUID()}, ${battle.id}, ${sha256(invitationSecret)},
+          ${timestamp(transaction, new Date(now.getTime() + 7 * DAY))}, ${timestamp(transaction, now)}
+        )
       `;
     });
     return { inviteUrl: clientUrl(config, { invite: invitationSecret }) };
@@ -563,7 +573,7 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
         WHERE invitation.id = ${candidate.invitationId}
           AND invitation.revoked_at IS NULL
           AND invitation.consumed_at IS NULL
-          AND invitation.expires_at > ${now}
+          AND invitation.expires_at > ${timestamp(transaction, now)}
           AND battle.status = 'setup'
         FOR UPDATE OF invitation
       `;
@@ -572,7 +582,7 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
       }
       const guestMembership = await transaction<{ userId: string }[]>`
         INSERT INTO active_battle_members (user_id, battle_id, created_at)
-        VALUES (${user.id}, ${invitation.battleId}, ${now})
+        VALUES (${user.id}, ${invitation.battleId}, ${timestamp(transaction, now)})
         ON CONFLICT (user_id) DO NOTHING
         RETURNING user_id AS "userId"
       `;
@@ -580,18 +590,18 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
         throw apiError("You already have an open battle.", 409);
       }
       const changed = await transaction<{ id: string }[]>`
-        UPDATE battles SET guest_user_id = ${user.id}, status = 'integration-proof', updated_at = ${now}
+        UPDATE battles SET guest_user_id = ${user.id}, status = 'integration-proof', updated_at = ${timestamp(transaction, now)}
         WHERE id = ${invitation.battleId} AND guest_user_id IS NULL AND status = 'setup'
         RETURNING id
       `;
       if (changed.length !== 1) throw apiError("This invitation was claimed by another creator.", 409);
       await transaction`
-        UPDATE battle_invitations SET consumed_at = ${now}, consumed_by_user_id = ${user.id}
+        UPDATE battle_invitations SET consumed_at = ${timestamp(transaction, now)}, consumed_by_user_id = ${user.id}
         WHERE id = ${invitation.invitationId}
       `;
       await transaction`
         INSERT INTO battle_members (battle_id, user_id, role, created_at)
-        VALUES (${invitation.battleId}, ${user.id}, 'guest', ${now})
+        VALUES (${invitation.battleId}, ${user.id}, 'guest', ${timestamp(transaction, now)})
       `;
       return invitation.battleId;
     });
@@ -759,12 +769,15 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     const expiresAt = new Date(now.getTime() + 30 * DAY);
     await database.client.begin(async (transaction) => {
       await transaction`
-        UPDATE overlay_credentials SET revoked_at = ${now}
+        UPDATE overlay_credentials SET revoked_at = ${timestamp(transaction, now)}
         WHERE owner_user_id = ${user.id} AND battle_id = ${battle.id} AND revoked_at IS NULL
       `;
       await transaction`
         INSERT INTO overlay_credentials (id, owner_user_id, battle_id, secret_hash, expires_at, created_at)
-        VALUES (${randomUUID()}, ${user.id}, ${battle.id}, ${sha256(secret)}, ${expiresAt}, ${now})
+        VALUES (
+          ${randomUUID()}, ${user.id}, ${battle.id}, ${sha256(secret)},
+          ${timestamp(transaction, expiresAt)}, ${timestamp(transaction, now)}
+        )
       `;
       // Rotating the private browser-source link invalidates a prior manual
       // confirmation: the creator must confirm the newly issued source.
@@ -773,7 +786,7 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
         WHERE battle_id = ${battle.id} AND user_id = ${user.id}
       `;
       await transaction`
-        UPDATE battles SET state_version = state_version + 1, updated_at = ${now}
+        UPDATE battles SET state_version = state_version + 1, updated_at = ${timestamp(transaction, now)}
         WHERE id = ${battle.id}
       `;
     });

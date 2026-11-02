@@ -116,7 +116,7 @@ export class BattleService {
         INSERT INTO challenge_set_versions (
           id, battle_id, version, proposed_by_user_id, voting_duration_seconds, created_at
         ) VALUES (
-          ${versionId}, ${battleId}, ${next.version}, ${userId}, ${challengeSet.votingDurationSeconds}, ${now}
+          ${versionId}, ${battleId}, ${next.version}, ${userId}, ${challengeSet.votingDurationSeconds}, ${timestamp(transaction, now)}
         )
       `;
       for (const option of challengeSet.options) {
@@ -125,13 +125,13 @@ export class BattleService {
             id, challenge_set_version_id, position, title, instruction, duration_seconds, created_at
           ) VALUES (
             ${randomUUID()}, ${versionId}, ${option.position}, ${option.title.trim()},
-            ${option.instruction.trim()}, ${option.durationSeconds}, ${now}
+            ${option.instruction.trim()}, ${option.durationSeconds}, ${timestamp(transaction, now)}
           )
         `;
       }
       const [updated] = await transaction<{ stateVersion: number }[]>`
         UPDATE battles
-        SET current_challenge_set_version_id = ${versionId}, state_version = state_version + 1, updated_at = ${now}
+        SET current_challenge_set_version_id = ${versionId}, state_version = state_version + 1, updated_at = ${timestamp(transaction, now)}
         WHERE id = ${battleId}
         RETURNING state_version AS "stateVersion"
       `;
@@ -151,7 +151,7 @@ export class BattleService {
       const now = new Date();
       const inserted = await transaction<{ userId: string }[]>`
         INSERT INTO challenge_set_approvals (challenge_set_version_id, user_id, approved_at)
-        VALUES (${membership.currentChallengeSetVersionId}, ${userId}, ${now})
+        VALUES (${membership.currentChallengeSetVersionId}, ${userId}, ${timestamp(transaction, now)})
         ON CONFLICT (challenge_set_version_id, user_id) DO NOTHING
         RETURNING user_id AS "userId"
       `;
@@ -165,7 +165,7 @@ export class BattleService {
       const bothApproved = Boolean(approvals?.hostApproved && approvals?.guestApproved);
       const [updated] = await transaction<{ stateVersion: number }[]>`
         UPDATE battles
-        SET state_version = state_version + ${inserted.length ? 1 : 0}, updated_at = ${now}
+        SET state_version = state_version + ${inserted.length ? 1 : 0}, updated_at = ${timestamp(transaction, now)}
         WHERE id = ${battleId}
         RETURNING state_version AS "stateVersion"
       `;
@@ -187,7 +187,7 @@ export class BattleService {
         WHERE battle_id = ${battleId}
           AND owner_user_id = ${userId}
           AND revoked_at IS NULL
-          AND expires_at > ${now}
+          AND expires_at > ${timestamp(transaction, now)}
         FOR UPDATE
       `;
       if (!overlayCredential) {
@@ -195,13 +195,13 @@ export class BattleService {
       }
       const changed = await transaction<{ userId: string }[]>`
         UPDATE battle_members
-        SET overlay_confirmed_at = COALESCE(overlay_confirmed_at, ${now})
+        SET overlay_confirmed_at = COALESCE(overlay_confirmed_at, ${timestamp(transaction, now)})
         WHERE battle_id = ${battleId} AND user_id = ${userId} AND overlay_confirmed_at IS NULL
         RETURNING user_id AS "userId"
       `;
       const [updated] = await transaction<{ stateVersion: number }[]>`
         UPDATE battles
-        SET state_version = state_version + ${changed.length ? 1 : 0}, updated_at = ${now}
+        SET state_version = state_version + ${changed.length ? 1 : 0}, updated_at = ${timestamp(transaction, now)}
         WHERE id = ${battleId}
         RETURNING state_version AS "stateVersion"
       `;
@@ -249,12 +249,12 @@ export class BattleService {
           voting_opens_at, voting_deadline_at, created_at, updated_at
         ) VALUES (
           ${roundId}, ${battleId}, ${membership.currentChallengeSetVersionId}, ${sequence.sequence}, 'voting', 0,
-          ${now}, ${deadline}, ${now}, ${now}
+          ${timestamp(transaction, now)}, ${timestamp(transaction, deadline)}, ${timestamp(transaction, now)}, ${timestamp(transaction, now)}
         )
       `;
       const [updated] = await transaction<{ stateVersion: number }[]>`
         UPDATE battles
-        SET current_round_id = ${roundId}, state_version = state_version + 1, updated_at = ${now}
+        SET current_round_id = ${roundId}, state_version = state_version + 1, updated_at = ${timestamp(transaction, now)}
         WHERE id = ${battleId}
         RETURNING state_version AS "stateVersion"
       `;
@@ -276,7 +276,7 @@ export class BattleService {
     const result = await this.database.client.begin(async (transaction) => {
       const deliveries = await transaction<{ deliveryId: string }[]>`
         INSERT INTO processed_twitch_events (delivery_id, received_at)
-        VALUES (${message.deliveryId}, ${message.receivedAt})
+        VALUES (${message.deliveryId}, ${timestamp(transaction, message.receivedAt)})
         ON CONFLICT (delivery_id) DO NOTHING
         RETURNING delivery_id AS "deliveryId"
       `;
@@ -314,7 +314,7 @@ export class BattleService {
         INSERT INTO battle_team_locks (
           battle_id, viewer_twitch_id, source_channel_twitch_id, target_user_id, locked_at
         ) VALUES (
-          ${vote.battleId}, ${message.viewerTwitchId}, ${message.sourceChannelTwitchId}, ${vote.targetUserId}, ${message.receivedAt}
+          ${vote.battleId}, ${message.viewerTwitchId}, ${message.sourceChannelTwitchId}, ${vote.targetUserId}, ${timestamp(transaction, message.receivedAt)}
         ) ON CONFLICT (battle_id, viewer_twitch_id) DO NOTHING
         RETURNING source_channel_twitch_id AS "sourceChannelTwitchId"
       `;
@@ -336,7 +336,7 @@ export class BattleService {
           message_id, battle_id, source_channel_twitch_id, viewer_twitch_id, target_user_id, option, received_at
         ) VALUES (
           ${message.messageId}, ${vote.battleId}, ${message.sourceChannelTwitchId}, ${message.viewerTwitchId},
-          ${vote.targetUserId}, ${String(vote.option)}, ${message.receivedAt}
+          ${vote.targetUserId}, ${String(vote.option)}, ${timestamp(transaction, message.receivedAt)}
         ) ON CONFLICT (message_id) DO NOTHING
         RETURNING message_id AS "messageId"
       `;
@@ -348,7 +348,7 @@ export class BattleService {
           option_position, message_id, received_at, updated_at
         ) VALUES (
           ${round.roundId}, ${message.viewerTwitchId}, ${message.sourceChannelTwitchId}, ${vote.targetUserId},
-          ${vote.option}, ${message.messageId}, ${message.receivedAt}, ${message.receivedAt}
+          ${vote.option}, ${message.messageId}, ${timestamp(transaction, message.receivedAt)}, ${timestamp(transaction, message.receivedAt)}
         ) ON CONFLICT (round_id, viewer_twitch_id) DO UPDATE SET
           source_channel_twitch_id = EXCLUDED.source_channel_twitch_id,
           target_user_id = EXCLUDED.target_user_id,
@@ -379,7 +379,7 @@ export class BattleService {
       const now = new Date();
       await transaction`
         INSERT INTO round_readiness (round_id, user_id, ready_at)
-        VALUES (${roundId}, ${userId}, ${now})
+        VALUES (${roundId}, ${userId}, ${timestamp(transaction, now)})
         ON CONFLICT (round_id, user_id) DO NOTHING
       `;
       const [ready] = await transaction<{ count: number }[]>`
@@ -391,7 +391,7 @@ export class BattleService {
       const startsAt = new Date(now.getTime() + 3_000);
       await transaction`
         UPDATE rounds
-        SET phase = 'countdown', countdown_starts_at = ${startsAt}, state_version = state_version + 1, updated_at = ${now}
+        SET phase = 'countdown', countdown_starts_at = ${timestamp(transaction, startsAt)}, state_version = state_version + 1, updated_at = ${timestamp(transaction, now)}
         WHERE id = ${roundId} AND phase = 'revealed'
       `;
       await this.bumpBattleState(transaction, battleId, now);
@@ -427,7 +427,7 @@ export class BattleService {
       await transaction`DELETE FROM round_readiness WHERE round_id = ${roundId}`;
       await transaction`
         UPDATE rounds
-        SET phase = 'revealed', countdown_starts_at = NULL, state_version = state_version + 1, updated_at = ${now}
+        SET phase = 'revealed', countdown_starts_at = NULL, state_version = state_version + 1, updated_at = ${timestamp(transaction, now)}
         WHERE id = ${roundId} AND phase = 'countdown'
       `;
       await this.bumpBattleState(transaction, battleId, now);
@@ -445,12 +445,12 @@ export class BattleService {
       const now = new Date();
       await transaction`
         UPDATE rounds
-        SET phase = 'stopped', completed_at = ${now}, terminal_reason = 'creator-stop',
-          state_version = state_version + 1, updated_at = ${now}
+        SET phase = 'stopped', completed_at = ${timestamp(transaction, now)}, terminal_reason = 'creator-stop',
+          state_version = state_version + 1, updated_at = ${timestamp(transaction, now)}
         WHERE id = ${roundId}
       `;
       await transaction`
-        UPDATE round_assignments SET cleared_at = COALESCE(cleared_at, ${now})
+        UPDATE round_assignments SET cleared_at = COALESCE(cleared_at, ${timestamp(transaction, now)})
         WHERE round_id = ${roundId}
       `;
       await this.bumpBattleState(transaction, battleId, now);
@@ -468,27 +468,27 @@ export class BattleService {
         if (isNonterminal(round.phase)) {
           await transaction`
             UPDATE rounds
-            SET phase = 'stopped', completed_at = ${now}, terminal_reason = 'battle-ended',
-              state_version = state_version + 1, updated_at = ${now}
+            SET phase = 'stopped', completed_at = ${timestamp(transaction, now)}, terminal_reason = 'battle-ended',
+              state_version = state_version + 1, updated_at = ${timestamp(transaction, now)}
             WHERE id = ${round.id}
           `;
           await transaction`
-            UPDATE round_assignments SET cleared_at = COALESCE(cleared_at, ${now})
+            UPDATE round_assignments SET cleared_at = COALESCE(cleared_at, ${timestamp(transaction, now)})
             WHERE round_id = ${round.id}
           `;
         }
       }
       await transaction`
-        UPDATE battle_invitations SET revoked_at = COALESCE(revoked_at, ${now})
+        UPDATE battle_invitations SET revoked_at = COALESCE(revoked_at, ${timestamp(transaction, now)})
         WHERE battle_id = ${battleId} AND consumed_at IS NULL
       `;
       await transaction`
-        UPDATE overlay_credentials SET revoked_at = COALESCE(revoked_at, ${now})
+        UPDATE overlay_credentials SET revoked_at = COALESCE(revoked_at, ${timestamp(transaction, now)})
         WHERE battle_id = ${battleId} AND revoked_at IS NULL
       `;
       await transaction`
         UPDATE battles
-        SET status = 'ended', state_version = state_version + 1, updated_at = ${now}
+        SET status = 'ended', state_version = state_version + 1, updated_at = ${timestamp(transaction, now)}
         WHERE id = ${battleId}
       `;
       await transaction`DELETE FROM active_battle_members WHERE battle_id = ${battleId}`;
@@ -515,7 +515,7 @@ export class BattleService {
 
       const now = new Date();
       await transaction`
-        UPDATE battle_members SET chat_connected_at = ${connected ? now : null}
+        UPDATE battle_members SET chat_connected_at = ${connected ? timestamp(transaction, now) : null}
         WHERE battle_id = ${membership.battleId} AND user_id = ${userId}
       `;
       if (!connected && membership.currentRoundId) {
@@ -524,12 +524,12 @@ export class BattleService {
           assertRoundTransition(round.phase, "invalidated");
           await transaction`
             UPDATE rounds
-            SET phase = 'invalidated', completed_at = ${now}, terminal_reason = 'chat-disconnected',
-              state_version = state_version + 1, updated_at = ${now}
+            SET phase = 'invalidated', completed_at = ${timestamp(transaction, now)}, terminal_reason = 'chat-disconnected',
+              state_version = state_version + 1, updated_at = ${timestamp(transaction, now)}
             WHERE id = ${round.id}
           `;
           await transaction`
-            UPDATE round_assignments SET cleared_at = COALESCE(cleared_at, ${now})
+            UPDATE round_assignments SET cleared_at = COALESCE(cleared_at, ${timestamp(transaction, now)})
             WHERE round_id = ${round.id}
           `;
           await transaction`DELETE FROM round_readiness WHERE round_id = ${round.id}`;
@@ -625,7 +625,7 @@ export class BattleService {
       if (resolution.kind === "no-votes") {
         await sql`
           INSERT INTO round_assignments (round_id, target_user_id, challenge_option_id, resolution, resolved_at)
-          VALUES (${round.id}, ${targetUserId}, NULL, 'no-votes', ${now})
+          VALUES (${round.id}, ${targetUserId}, NULL, 'no-votes', ${timestamp(sql, now)})
         `;
         continue;
       }
@@ -636,7 +636,7 @@ export class BattleService {
         INSERT INTO round_assignments (round_id, target_user_id, challenge_option_id, resolution, resolved_at)
         VALUES (
           ${round.id}, ${targetUserId}, ${option.id},
-          ${resolution.tiedOptions.length > 1 ? "tie-break" : "winner"}, ${now}
+          ${resolution.tiedOptions.length > 1 ? "tie-break" : "winner"}, ${timestamp(sql, now)}
         )
       `;
     }
@@ -644,8 +644,8 @@ export class BattleService {
     const nextPhase: RoundPhase = hasSelection ? "revealed" : "no-votes";
     await sql`
       UPDATE rounds
-      SET phase = ${nextPhase}, revealed_at = ${now}, completed_at = ${hasSelection ? null : now},
-        terminal_reason = ${hasSelection ? null : "no-votes"}, state_version = state_version + 1, updated_at = ${now}
+      SET phase = ${nextPhase}, revealed_at = ${timestamp(sql, now)}, completed_at = ${hasSelection ? null : timestamp(sql, now)},
+        terminal_reason = ${hasSelection ? null : "no-votes"}, state_version = state_version + 1, updated_at = ${timestamp(sql, now)}
       WHERE id = ${round.id} AND phase = 'voting'
     `;
     await this.bumpBattleState(sql, round.battleId, now);
@@ -663,13 +663,15 @@ export class BattleService {
     for (const assignment of assignments) {
       const endsAt = new Date(round.countdownStartsAt.getTime() + assignment.durationSeconds * 1_000);
       await sql`
-        UPDATE round_assignments SET starts_at = ${round.countdownStartsAt}, ends_at = ${endsAt}
+        UPDATE round_assignments
+        SET starts_at = ${timestamp(sql, round.countdownStartsAt)}, ends_at = ${timestamp(sql, endsAt)}
         WHERE round_id = ${round.id} AND target_user_id = ${assignment.assignmentId}
       `;
     }
     await sql`
       UPDATE rounds
-      SET phase = 'active', active_at = ${round.countdownStartsAt}, state_version = state_version + 1, updated_at = ${now}
+      SET phase = 'active', active_at = ${timestamp(sql, round.countdownStartsAt)},
+        state_version = state_version + 1, updated_at = ${timestamp(sql, now)}
       WHERE id = ${round.id} AND phase = 'countdown'
     `;
     await this.bumpBattleState(sql, round.battleId, now);
@@ -678,10 +680,10 @@ export class BattleService {
   private async expireAssignments(sql: SqlClient, round: ActiveRound, now: Date): Promise<boolean> {
     const cleared = await sql<{ targetUserId: string }[]>`
       UPDATE round_assignments
-      SET cleared_at = ${now}
+      SET cleared_at = ${timestamp(sql, now)}
       WHERE round_id = ${round.id}
         AND ends_at IS NOT NULL
-        AND ends_at <= ${now}
+        AND ends_at <= ${timestamp(sql, now)}
         AND cleared_at IS NULL
       RETURNING target_user_id AS "targetUserId"
     `;
@@ -694,7 +696,8 @@ export class BattleService {
     assertRoundTransition(round.phase, "complete");
     await sql`
       UPDATE rounds
-      SET phase = 'complete', completed_at = ${now}, state_version = state_version + 1, updated_at = ${now}
+      SET phase = 'complete', completed_at = ${timestamp(sql, now)},
+        state_version = state_version + 1, updated_at = ${timestamp(sql, now)}
       WHERE id = ${round.id} AND phase = 'active'
     `;
     await this.bumpBattleState(sql, round.battleId, now);
@@ -734,7 +737,7 @@ export class BattleService {
   private async bumpBattleState(sql: SqlClient, battleId: string, now: Date): Promise<void> {
     await sql`
       UPDATE battles
-      SET state_version = state_version + 1, updated_at = ${now}
+      SET state_version = state_version + 1, updated_at = ${timestamp(sql, now)}
       WHERE id = ${battleId}
     `;
   }
