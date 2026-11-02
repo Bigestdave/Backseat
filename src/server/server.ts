@@ -93,6 +93,15 @@ function apiError(message: string, statusCode: number): Error {
   return error;
 }
 
+function oauthFailureReason(error: unknown): "token-exchange" | "token-validation" | "scope" | "database-schema" | "server" {
+  const message = error instanceof Error ? error.message : "";
+  if (message.includes("Twitch token exchange failed")) return "token-exchange";
+  if (message.includes("Twitch access token validation failed")) return "token-validation";
+  if (message.includes("Twitch did not grant chat-read access")) return "scope";
+  if (message.includes("relation") && message.includes("does not exist")) return "database-schema";
+  return "server";
+}
+
 function enforceRateLimit(
   limiter: FixedWindowRateLimiter,
   key: string,
@@ -318,11 +327,16 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
       const [user] = await database.client<{ id: string }[]>`SELECT id FROM users WHERE twitch_id = ${identity.twitchId}`;
       if (!user) throw new Error("Twitch identity was not stored.");
       await createCreatorSession(database, reply, config, user.id);
-      await eventSub.reconcile();
+      // A creator has authenticated before they create a battle. EventSub is
+      // reconciled again when a battle exists, so an upstream socket issue
+      // must not turn a successful OAuth callback into a failed login.
+      void eventSub.reconcile().catch((error: unknown) => {
+        request.log.warn({ err: error }, "Twitch EventSub reconciliation after OAuth failed");
+      });
       return reply.redirect(clientUrl(config, { connected: "1" }));
     } catch (error) {
       request.log.warn({ err: error }, "Twitch OAuth callback failed");
-      return reply.redirect(clientUrl(config, { oauth: "failed" }));
+      return reply.redirect(clientUrl(config, { oauth: "failed", reason: oauthFailureReason(error) }));
     }
   });
 

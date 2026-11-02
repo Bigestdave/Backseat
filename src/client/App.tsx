@@ -151,6 +151,7 @@ function cleanOAuthQuery(): void {
   if (!url.searchParams.has("connected") && !url.searchParams.has("oauth")) return;
   url.searchParams.delete("connected");
   url.searchParams.delete("oauth");
+  url.searchParams.delete("reason");
   window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`);
 }
 
@@ -853,6 +854,7 @@ export function App(): ReactNode {
   const [demoError, setDemoError] = useState<string | null>(null);
   const [demoOverlayUrl, setDemoOverlayUrl] = useState<string | null>(null);
   const initialOAuthResult = useRef(new URLSearchParams(window.location.search).get("oauth"));
+  const initialOAuthReason = useRef(new URLSearchParams(window.location.search).get("reason"));
   const sessionQuery = useQuery({
     queryKey: ["session"],
     queryFn: () => api<SessionResponse>("/api/session"),
@@ -919,7 +921,15 @@ export function App(): ReactNode {
     const oauthMessage = demoError ?? (initialOAuthResult.current === "denied"
       ? "Twitch authorization was cancelled or could not be verified. No creator session was created."
       : initialOAuthResult.current === "failed"
-        ? "Twitch authorization failed on the server. Check the server configuration and try again."
+        ? initialOAuthReason.current === "token-exchange"
+          ? "Twitch rejected Backseat’s server credentials or callback settings. In Render, confirm the current client secret belongs to the same Twitch app as the client ID, then confirm Twitch has this exact callback URL: https://backseat-2znp.onrender.com/auth/twitch/callback."
+          : initialOAuthReason.current === "token-validation"
+            ? "Twitch issued a token Backseat could not validate. Try connecting again; if it repeats, confirm the Render client ID belongs to this Twitch app."
+            : initialOAuthReason.current === "scope"
+              ? "Twitch did not grant the required chat permission. Approve the requested Twitch access and try again."
+              : initialOAuthReason.current === "database-schema"
+                ? "Backseat’s database setup is incomplete. Wait for the latest Render deployment to finish its migrations, then try again."
+                : "Twitch authorization failed on the server. Check the current Render log entry named “Twitch OAuth callback failed” and try again."
         : null);
     return <CreatorLanding invite={invite} oauthMessage={oauthMessage} startingDemo={isStartingDemo} onStartDemo={startDemo} />;
   }
