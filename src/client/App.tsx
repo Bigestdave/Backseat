@@ -311,7 +311,7 @@ function InviteDecision({ invite, battle, accepting, onAccept }: {
     return (
       <section className="invite-decision" aria-labelledby="invite-title">
         <p className="eyebrow">Invitation pending</p>
-        <h2 id="invite-title">You already have an open battle.</h2>
+        <h1 id="invite-title">You already have an open session.</h1>
         <p>Backseat keeps one open battle per streamer. Finish or leave the current battle before accepting another invitation.</p>
       </section>
     );
@@ -319,11 +319,11 @@ function InviteDecision({ invite, battle, accepting, onAccept }: {
 
   return (
     <section className="invite-decision" aria-labelledby="invite-title">
-      <p className="eyebrow">Invitation pending</p>
-      <h2 id="invite-title">Join this two-streamer session?</h2>
-      <p>You will occupy the guest seat. Joining does not open voting or start a round.</p>
+      <p className="eyebrow">You have been invited</p>
+      <h1 id="invite-title">Join a Backseat session.</h1>
+      <p>You will occupy the guest seat. Joining lets you review the shared challenges; it does not open picks or start a round.</p>
       <button className="button button--primary" type="button" disabled={accepting} onClick={() => void onAccept()}>
-        {accepting ? "Joining…" : "Join battle"}
+        {accepting ? "Joining…" : "Join session"}
       </button>
     </section>
   );
@@ -348,6 +348,31 @@ function BattleIdentity({ battle, user }: { battle: Battle; user: SessionUser })
   );
 }
 
+type BattleFlowProps = {
+  battle: Battle;
+  user: SessionUser;
+  overlayUrl: string | null;
+  inviteUrl: string | null;
+  busy: boolean;
+  invitationBusy: boolean;
+  onCreateInvitation: () => Promise<void>;
+  onCreateOverlay: () => Promise<void>;
+  onConfirmOverlay: () => Promise<boolean>;
+  onProposeChallenges: (options: ChallengeDraft[], votingDurationSeconds: number) => Promise<boolean>;
+  onApproveChallenges: () => Promise<boolean>;
+  onOpenVoting: () => Promise<boolean>;
+  onReady: (roundId: string) => Promise<boolean>;
+  onUnready: (roundId: string) => Promise<boolean>;
+  onCancelStart: (roundId: string) => Promise<boolean>;
+  onLockInPicks: (roundId: string) => Promise<boolean>;
+  onStopRound: (roundId: string) => Promise<boolean>;
+  onRecordOutcome: (roundId: string, outcome: "host" | "guest" | "draw") => Promise<boolean>;
+  onEndBattle: () => Promise<boolean>;
+  onSimulateVote: (sourceRole: "host" | "guest", option: PickPosition) => Promise<boolean>;
+  onSimulateRivalReady: (roundId: string) => Promise<boolean>;
+  onSignOut: () => Promise<void>;
+};
+
 function BattleControls({
   battle,
   user,
@@ -367,26 +392,7 @@ function BattleControls({
   onEndBattle,
   onSimulateVote,
   onSimulateRivalReady
-}: {
-  battle: Battle;
-  user: SessionUser;
-  overlayUrl: string | null;
-  busy: boolean;
-  onCreateOverlay: () => Promise<void>;
-  onConfirmOverlay: () => Promise<boolean>;
-  onProposeChallenges: (options: ChallengeDraft[], votingDurationSeconds: number) => Promise<boolean>;
-  onApproveChallenges: () => Promise<boolean>;
-  onOpenVoting: () => Promise<boolean>;
-  onReady: (roundId: string) => Promise<boolean>;
-  onUnready: (roundId: string) => Promise<boolean>;
-  onCancelStart: (roundId: string) => Promise<boolean>;
-  onLockInPicks: (roundId: string) => Promise<boolean>;
-  onStopRound: (roundId: string) => Promise<boolean>;
-  onRecordOutcome: (roundId: string, outcome: "host" | "guest" | "draw") => Promise<boolean>;
-  onEndBattle: () => Promise<boolean>;
-  onSimulateVote: (sourceRole: "host" | "guest", option: PickPosition) => Promise<boolean>;
-  onSimulateRivalReady: (roundId: string) => Promise<boolean>;
-}): ReactNode {
+}: Omit<BattleFlowProps, "inviteUrl" | "invitationBusy" | "onCreateInvitation" | "onSignOut">): ReactNode {
   const [editorOpen, setEditorOpen] = useState(!battle.challengeSet);
   const [options, setOptions] = useState<ChallengeDraft[]>(() => draftOptions(battle.challengeSet));
   const [votingDurationSeconds, setVotingDurationSeconds] = useState(String(battle.challengeSet?.votingDurationSeconds ?? 18));
@@ -573,6 +579,320 @@ function Scoreboard({ battle }: { battle: Battle }): ReactNode {
   );
 }
 
+type FlowStage = "invite" | "agree" | "overlay" | "pick" | "play" | "result" | "scoreboard";
+
+function participantFor(battle: Battle, role: "host" | "guest"): Participant | undefined {
+  return battle.participants.find((participant) => participant.role === role);
+}
+
+function creatorCutout(name: string | undefined): string | null {
+  const normalized = name?.toLowerCase() ?? "";
+  if (normalized.includes("fredlock")) return "/assets/fredlocks-cutout.png";
+  if (normalized.includes("rampage")) return "/assets/rampagegod-cutout.png";
+  return null;
+}
+
+function FlowCreatorCard({ participant, role, currentUserId }: { participant?: Participant; role: "host" | "guest"; currentUserId: string }): ReactNode {
+  const name = participant?.displayName ?? "Waiting for your rival";
+  const cutout = creatorCutout(participant?.displayName);
+  const isYou = participant?.userId === currentUserId;
+  return (
+    <div className={`flow-creator-card flow-creator-card--${role}`}>
+      <div className="flow-creator-card__portrait">
+        {cutout ? <img src={cutout} alt="" /> : <CreatorMark name={name} role={role} />}
+      </div>
+      <div className="flow-creator-card__caption">
+        <strong>@{name}</strong>
+        <span>{participant ? (isYou ? "You" : "Your rival") : "Invite link ready when you are"}</span>
+      </div>
+    </div>
+  );
+}
+
+function FlowHeader({ stage, battle, user, onSignOut }: { stage: FlowStage; battle: Battle; user: SessionUser; onSignOut: () => Promise<void> }): ReactNode {
+  const steps: Array<{ id: FlowStage; label: string }> = [
+    { id: "invite", label: "Invite" },
+    { id: "agree", label: "Agree" },
+    { id: "overlay", label: "Overlay" },
+    { id: "pick", label: "Pick" },
+    { id: "play", label: "Play" }
+  ];
+  const visibleStage = stage === "result" || stage === "scoreboard" ? "play" : stage;
+  const activeIndex = steps.findIndex((item) => item.id === visibleStage);
+  return (
+    <header className="flow-header">
+      <Logo compact />
+      <nav className="flow-header__steps" aria-label="Session progress">
+        {steps.map((item, index) => <span key={item.id} className={index === activeIndex ? "is-active" : index < activeIndex ? "is-complete" : ""}>{item.label}</span>)}
+      </nav>
+      <div className="flow-header__account">
+        <span className={battle.mode === "simulated" ? "mode-label mode-label--simulated" : "mode-label"}>{battle.mode === "simulated" ? "Simulated" : "Twitch"}</span>
+        <button className="button button--text" type="button" onClick={() => void onSignOut()}>@{user.displayName}</button>
+      </div>
+    </header>
+  );
+}
+
+function FlowHero({ battle, user }: { battle: Battle; user: SessionUser }): ReactNode {
+  return (
+    <section className="flow-hero" aria-label="The two streamers in this session">
+      <FlowCreatorCard participant={participantFor(battle, "host")} role="host" currentUserId={user.id} />
+      <img className="flow-hero__bolt" src="/assets/lightning.png" alt="" aria-hidden="true" />
+      <FlowCreatorCard participant={participantFor(battle, "guest")} role="guest" currentUserId={user.id} />
+    </section>
+  );
+}
+
+function Countdown({ until, label = "left" }: { until: string | null; label?: string }): ReactNode {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, []);
+  const seconds = until ? Math.max(0, Math.ceil((new Date(until).getTime() - now) / 1_000)) : 0;
+  return <span className="flow-countdown"><b>{seconds}s</b> {label}</span>;
+}
+
+function FlowAssignments({ round, battle, compact = false }: { round: Round; battle: Battle; compact?: boolean }): ReactNode {
+  const host = participantFor(battle, "host");
+  const guest = participantFor(battle, "guest");
+  const assignmentFor = (participant?: Participant) => round.assignments.find((assignment) => assignment.targetUserId === participant?.userId);
+  const cards = [
+    { participant: host, assignment: assignmentFor(host), role: "host" as const },
+    { participant: guest, assignment: assignmentFor(guest), role: "guest" as const }
+  ];
+  return (
+    <div className={`flow-assignments ${compact ? "flow-assignments--compact" : ""}`}>
+      {cards.map(({ participant, assignment, role }) => (
+        <section className={`flow-assignment flow-assignment--${role}`} key={role}>
+          <span>@{participant?.displayName ?? (role === "host" ? "Host" : "Guest")}</span>
+          <strong>{assignment?.title ?? "Play normally"}{assignment?.durationSeconds ? <em>{assignment.durationSeconds}s</em> : null}</strong>
+          {!compact && <small>{assignment?.instruction ?? "No valid pick this round."}</small>}
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function FlowInvite({ battle, user, inviteUrl, invitationBusy, onCreateInvitation }: Pick<BattleFlowProps, "battle" | "user" | "inviteUrl" | "invitationBusy" | "onCreateInvitation">): ReactNode {
+  const host = participantFor(battle, "host");
+  const isHost = battle.role === "host";
+  return (
+    <>
+      <FlowHero battle={battle} user={user} />
+      <section className="flow-sheet flow-sheet--invite">
+        <p className="eyebrow">One rival. One shared session.</p>
+        <h1>{isHost ? "Invite your rival" : "You joined the session"}</h1>
+        <p className="lede">{isHost
+          ? "Send this one-time link to the streamer you want to challenge. Nothing opens until you both agree on the challenges."
+          : `You are in @${host?.displayName ?? "the host"}'s session. The host is setting up the shared challenges.`}</p>
+        {isHost && (
+          <div className="flow-invite-control">
+            {inviteUrl ? <CopyControl value={inviteUrl} label="battle-invitation-link" /> : <p className="flow-help">Create a private link when you are ready to send it.</p>}
+            <button className="button button--primary" type="button" disabled={invitationBusy} onClick={() => void onCreateInvitation()}>
+              {invitationBusy ? "Creating invitation…" : inviteUrl ? "Create a new invite link" : "Create invite link"}
+            </button>
+            {inviteUrl && <p className="quiet-copy">Creating a new link revokes the previous one.</p>}
+          </div>
+        )}
+        {!isHost && <p className="flow-help">You can leave this tab open. The next screen appears as soon as the host shares a challenge list.</p>}
+      </section>
+    </>
+  );
+}
+
+function FlowAgreement({ battle, user, busy, onProposeChallenges, onApproveChallenges, onContinue }: Pick<BattleFlowProps, "battle" | "user" | "busy" | "onProposeChallenges" | "onApproveChallenges"> & { onContinue?: () => void }): ReactNode {
+  const [options, setOptions] = useState<ChallengeDraft[]>(() => draftOptions(battle.challengeSet));
+  const [votingDurationSeconds, setVotingDurationSeconds] = useState(String(battle.challengeSet?.votingDurationSeconds ?? 18));
+  const challengeSet = battle.challengeSet;
+  const ownApproval = Boolean(challengeSet?.approvedByUserIds.includes(user.id));
+  const bothApproved = challengeSet?.approvedByUserIds.length === 2;
+
+  useEffect(() => {
+    setOptions(draftOptions(battle.challengeSet));
+    setVotingDurationSeconds(String(battle.challengeSet?.votingDurationSeconds ?? 18));
+  }, [battle.challengeSet?.id, battle.challengeSet?.version]);
+
+  function updateOption(position: PickPosition, field: "title" | "instruction" | "durationSeconds", value: string): void {
+    setOptions((current) => current.map((option) => option.position === position
+      ? { ...option, [field]: field === "durationSeconds" ? Number(value) : value }
+      : option
+    ));
+  }
+
+  function addOption(): void {
+    setOptions((current) => current.length >= 4 ? current : [...current, {
+      position: (current.length + 1) as PickPosition,
+      title: "",
+      instruction: "Follow this challenge.",
+      durationSeconds: 20
+    }]);
+  }
+
+  function removeOption(position: PickPosition): void {
+    setOptions((current) => current.length <= 2 ? current : current
+      .filter((option) => option.position !== position)
+      .map((option, index) => ({ ...option, position: (index + 1) as PickPosition }))
+    );
+  }
+
+  return (
+    <section className="flow-sheet flow-sheet--agreement">
+      <div className="flow-title-row">
+        <div className="flow-title-row__avatars"><CreatorMark name={participantFor(battle, "host")?.displayName ?? "Host"} role="host" /><CreatorMark name={participantFor(battle, "guest")?.displayName ?? "Guest"} role="guest" /></div>
+        <div><p className="eyebrow">Shared rules</p><h1>Agree on challenges</h1><p className="lede">You and your rival build this list together. Editing it creates a new version that both streamers must approve.</p></div>
+      </div>
+      <div className="flow-challenge-editor">
+        <div className="flow-challenge-editor__labels"><span>Challenge</span><span>Added by</span><span>Time</span></div>
+        {options.map((option) => {
+          const saved = challengeSet?.options.find((item) => item.position === option.position);
+          return <div className="flow-challenge-row" key={option.position}>
+            <span className="flow-pick-number">{option.position}</span>
+            <div><label className="sr-only" htmlFor={`challenge-title-${option.position}`}>Challenge {option.position}</label><input id={`challenge-title-${option.position}`} value={option.title} maxLength={80} onChange={(event) => updateOption(option.position, "title", event.target.value)} placeholder="Challenge name" /><label className="sr-only" htmlFor={`challenge-instruction-${option.position}`}>Instruction</label><input id={`challenge-instruction-${option.position}`} value={option.instruction} maxLength={180} onChange={(event) => updateOption(option.position, "instruction", event.target.value)} placeholder="What does it mean?" /></div>
+            <small>{saved ? `@${saved.addedByDisplayName}` : "New"}</small>
+            <label><span className="sr-only">Duration</span><select value={option.durationSeconds} onChange={(event) => updateOption(option.position, "durationSeconds", event.target.value)}>{DURATION_OPTIONS.map((duration) => <option key={duration} value={duration}>{duration}s</option>)}</select></label>
+            {options.length > 2 ? <button className="flow-icon-button" type="button" onClick={() => removeOption(option.position)} aria-label={`Remove challenge ${option.position}`}>×</button> : <span />}
+          </div>;
+        })}
+        <div className="flow-challenge-actions">
+          {options.length < 4 && <button className="button button--text" type="button" onClick={addOption}>+ Add a challenge</button>}
+          <label>Chat pick window <input type="number" min="5" max="120" value={votingDurationSeconds} onChange={(event) => setVotingDurationSeconds(event.target.value)} /> seconds</label>
+          <button className="button button--primary" type="button" disabled={busy} onClick={() => void onProposeChallenges(options, Number(votingDurationSeconds))}>Save list</button>
+        </div>
+      </div>
+      <div className="flow-approval-row">
+        <p><b>@{participantFor(battle, "host")?.displayName ?? "Host"}</b> {challengeSet?.approvedByUserIds.includes(participantFor(battle, "host")?.userId ?? "") ? "approved" : "is reviewing"} · <b>@{participantFor(battle, "guest")?.displayName ?? "Guest"}</b> {challengeSet?.approvedByUserIds.includes(participantFor(battle, "guest")?.userId ?? "") ? "approved" : "is reviewing"}</p>
+        {bothApproved ? onContinue ? <button className="button button--secondary" type="button" onClick={onContinue}>Back to overlay</button> : <span className="flow-approved">Challenges approved ✓</span> : ownApproval ? <span className="flow-help">Waiting for your rival</span> : <button className="button button--primary" type="button" disabled={busy || !challengeSet} onClick={() => void onApproveChallenges()}>Approve challenges</button>}
+      </div>
+    </section>
+  );
+}
+
+function FlowOverlaySetup({ battle, user, overlayUrl, busy, onCreateOverlay, onConfirmOverlay, onEditChallenges }: Pick<BattleFlowProps, "battle" | "user" | "overlayUrl" | "busy" | "onCreateOverlay" | "onConfirmOverlay"> & { onEditChallenges: () => void }): ReactNode {
+  const ownOverlayConfirmed = battle.participants.some((participant) => participant.userId === user.id && participant.overlayConfirmedAt);
+  const bothConfirmed = battle.participants.length === 2 && battle.participants.every((participant) => participant.overlayConfirmedAt);
+  const rival = battle.participants.find((participant) => participant.userId !== user.id);
+  return (
+    <section className="flow-sheet flow-sheet--overlay">
+      <div className="flow-title-row">
+        <CreatorMark name={user.displayName} role={battle.role} />
+        <div><p className="eyebrow">Your stream</p><h1>Set up your stream overlay</h1><p className="lede">Paste your private link into an OBS Browser Source, then confirm after you can see it on your stream.</p></div>
+      </div>
+      <div className="flow-overlay-layout">
+        <div>
+          <h2>Your private browser-source link</h2>
+          {overlayUrl ? <><CopyControl value={overlayUrl} label="private-overlay-link" /><a className="flow-inline-link" href={overlayUrl} target="_blank" rel="noreferrer">Open overlay preview ↗</a><p className="quiet-copy">Keep this link private. Its credential is the part after <code>#</code>.</p></> : <button className="button button--primary" type="button" disabled={busy} onClick={() => void onCreateOverlay()}>Create my private link</button>}
+          <ol className="flow-steps"><li>Add a Browser Source in OBS.</li><li>Paste your private link.</li><li>Check that it appears on stream.</li></ol>
+          {overlayUrl && !ownOverlayConfirmed && <button className="button button--primary" type="button" disabled={busy} onClick={() => void onConfirmOverlay()}>I can see it in OBS</button>}
+          {ownOverlayConfirmed && <p className="flow-approved">Your overlay is confirmed ✓</p>}
+          <button className="button button--text" type="button" onClick={onEditChallenges}>Edit shared challenges</button>
+        </div>
+        <aside className="flow-overlay-preview" aria-label="Overlay preview">
+          <span>Read-only browser source</span>
+          <div><CreatorMark name={user.displayName} role={battle.role} /><strong>@{user.displayName}</strong><i>↔</i><CreatorMark name={rival?.displayName ?? "?"} role={battle.role === "host" ? "guest" : "host"} /><strong>@{rival?.displayName ?? "Rival"}</strong></div>
+          <p>{bothConfirmed ? "Both overlays are ready." : `Waiting for @${rival?.displayName ?? "your rival"} to confirm.`}</p>
+        </aside>
+      </div>
+    </section>
+  );
+}
+
+function FlowPick({ battle, user, busy, onOpenVoting, onLockInPicks, onStopRound, onSimulateVote }: Pick<BattleFlowProps, "battle" | "user" | "busy" | "onOpenVoting" | "onLockInPicks" | "onStopRound" | "onSimulateVote">): ReactNode {
+  const round = battle.round;
+  const challengeSet = battle.challengeSet;
+  const [stopArmed, setStopArmed] = useState(false);
+  const canOpen = battle.participants.length === 2
+    && Boolean(challengeSet && challengeSet.approvedByUserIds.length === 2)
+    && battle.participants.every((participant) => participant.overlayConfirmedAt)
+    && battle.participants.every((participant) => participant.chatConnectedAt);
+  const host = participantFor(battle, "host");
+  const guest = participantFor(battle, "guest");
+
+  function requestStop(): void {
+    if (!round) return;
+    if (stopArmed) {
+      setStopArmed(false);
+      void onStopRound(round.id);
+      return;
+    }
+    setStopArmed(true);
+    window.setTimeout(() => setStopArmed(false), 2500);
+  }
+
+  if (!round) {
+    const explanation = !challengeSet ? "Add a challenge list first." : challengeSet.approvedByUserIds.length !== 2 ? "Both streamers need to approve this exact list." : !battle.participants.every((participant) => participant.overlayConfirmedAt) ? "Both streamers need to confirm their own overlay." : !battle.participants.every((participant) => participant.chatConnectedAt) ? "Both Twitch chats must be connected." : "Either streamer can open the next pick.";
+    return <><FlowHero battle={battle} user={user} /><section className="flow-sheet flow-sheet--pick-empty"><p className="eyebrow">Chat control</p><h1>Let chat choose</h1><p className="lede">Each chat picks a challenge for the other streamer to play.</p><button className="button button--primary" type="button" disabled={busy || !canOpen} onClick={() => void onOpenVoting()}>Let chat pick</button><p className="flow-help">{explanation}</p></section></>;
+  }
+
+  return <><FlowHero battle={battle} user={user} /><section className="flow-sheet flow-sheet--pick"><div className="flow-pick-heading"><p className="eyebrow">Live picks</p><h1>Chats are choosing</h1><Countdown until={round.votingDeadlineAt} label="left to pick" /></div><div className="flow-pick-columns">{[
+    { target: host, source: guest, sourceRole: "guest" as const, label: "Your challenge" },
+    { target: guest, source: host, sourceRole: "host" as const, label: `${guest?.displayName ?? "Rival"}'s challenge` }
+  ].map(({ target, source, sourceRole, label }) => <section className="flow-pick-panel" key={sourceRole}><h2>{target?.userId === user.id ? "Your challenge" : label}</h2><p>Picked by @{source?.displayName ?? "the other"}'s chat · type <code>!pick 1–{challengeSet?.options.length ?? 3}</code></p><ol>{challengeSet?.options.map((option) => <li key={option.id}><span>{option.position}</span><strong>{option.title}</strong><em>{option.durationSeconds}s</em>{battle.mode === "simulated" && <button type="button" disabled={busy} onClick={() => void onSimulateVote(sourceRole, option.position)}>Simulate !pick {option.position}</button>}</li>)}</ol></section>)}</div>{battle.mode === "simulated" && <p className="flow-demo-note">Simulated votes are marked here and never reach Twitch.</p>}<div className="flow-sheet__actions"><button className={`button ${stopArmed ? "button--primary" : "button--text button--danger"}`} type="button" disabled={busy} onClick={requestStop}>{stopArmed ? "Tap again to stop" : "Stop round"}</button><button className="button button--primary" type="button" disabled={busy} onClick={() => void onLockInPicks(round.id)}>Lock in picks</button></div></section></>;
+}
+
+function FlowPlay({ battle, user, busy, onReady, onUnready, onCancelStart, onStopRound, onSimulateRivalReady }: Pick<BattleFlowProps, "battle" | "user" | "busy" | "onReady" | "onUnready" | "onCancelStart" | "onStopRound" | "onSimulateRivalReady">): ReactNode {
+  const round = battle.round;
+  const [stopArmed, setStopArmed] = useState(false);
+  if (!round) return null;
+  const ownReady = round.readyUserIds.includes(user.id);
+  const rival = battle.participants.find((participant) => participant.userId !== user.id);
+  const rivalReady = Boolean(rival && round.readyUserIds.includes(rival.userId));
+  const requestStop = (): void => {
+    if (stopArmed) { setStopArmed(false); void onStopRound(round.id); return; }
+    setStopArmed(true); window.setTimeout(() => setStopArmed(false), 2500);
+  };
+  return <><FlowHero battle={battle} user={user} /><section className="flow-sheet flow-sheet--play"><FlowAssignments round={round} battle={battle} />{round.phase === "revealed" && <div className="flow-ready"><div><p className="eyebrow">Both streamers decide</p><h1>{ownReady ? "Waiting for your rival" : "Ready to play?"}</h1><p className="lede">The three-second countdown begins only when both streamers are ready.</p></div><div className="flow-ready__status"><span>{ownReady ? "✓ You are ready" : "You are not ready"}</span><span>{rivalReady ? `✓ @${rival?.displayName ?? "Rival"} is ready` : `Waiting for @${rival?.displayName ?? "Rival"}`}</span></div><div className="flow-sheet__actions">{ownReady ? <button className="button button--secondary" type="button" disabled={busy} onClick={() => void onUnready(round.id)}>Not ready</button> : <button className="button button--primary" type="button" disabled={busy} onClick={() => void onReady(round.id)}>I’m ready</button>}{battle.mode === "simulated" && !rivalReady && <button className="button button--secondary" type="button" disabled={busy} onClick={() => void onSimulateRivalReady(round.id)}>Simulate rival ready</button>}<button className="button button--text button--danger" type="button" disabled={busy} onClick={requestStop}>Stop round</button></div></div>}{round.phase === "countdown" && <div className="flow-countdown-splash"><p>Starting in</p><Countdown until={round.activeAt ?? round.countdownStartsAt} label="" /><button className="button button--text" type="button" disabled={busy} onClick={() => void onCancelStart(round.id)}>Cancel start</button></div>}{round.phase === "active" && <div className="flow-active"><p className="eyebrow">Challenges are on</p><h1>Play it out.</h1><p className="lede">Both challenges clear on their own timer.</p><div className="flow-active__timers">{round.assignments.map((assignment) => <span key={assignment.targetUserId}>@{assignment.targetDisplayName} {assignment.endsAt ? <Countdown until={assignment.endsAt} /> : "Cleared"}</span>)}</div><button className={`button ${stopArmed ? "button--primary" : "button--text button--danger"}`} type="button" disabled={busy} onClick={requestStop}>{stopArmed ? "Tap again to stop" : "Stop round"}</button></div>}</section></>;
+}
+
+function FlowResult({ battle, user, busy, onRecordOutcome, onOpenVoting }: Pick<BattleFlowProps, "battle" | "user" | "busy" | "onRecordOutcome" | "onOpenVoting">): ReactNode {
+  const round = battle.round;
+  if (!round) return null;
+  const message = round.phase === "no-votes" ? "No valid picks this time. Play normally." : round.phase === "stopped" ? `${round.stoppedByDisplayName ? `@${round.stoppedByDisplayName} stopped this round.` : "This round was stopped."} Both challenges are cleared.` : round.phase === "invalidated" ? "A chat feed disconnected before the countdown, so this round was cancelled." : "Both challenges are complete. Choose the round result.";
+  return <><FlowHero battle={battle} user={user} /><section className="flow-sheet flow-sheet--result"><p className="eyebrow">Round update</p><h1>{round.phase === "complete" ? "Round complete" : round.phase === "no-votes" ? "No picks this time" : round.phase === "stopped" ? "Round stopped" : "Round cancelled"}</h1><p className="lede">{message}</p><FlowAssignments round={round} battle={battle} compact />{round.phase === "complete" && !round.outcome && <div className="flow-outcome"><strong>Who won?</strong><span>Backseat records the result the streamers select. It does not judge gameplay.</span><div>{(["host", "guest", "draw"] as const).map((outcome) => <button key={outcome} className="button button--secondary" type="button" disabled={busy} onClick={() => void onRecordOutcome(round.id, outcome)}>{outcome === "draw" ? "Draw" : `@${participantFor(battle, outcome)?.displayName ?? outcome}`}</button>)}</div></div>}{round.phase !== "complete" && <button className="button button--primary" type="button" disabled={busy} onClick={() => void onOpenVoting()}>Open next pick</button>}</section></>;
+}
+
+function FlowScoreboard({ battle, busy, onOpenVoting, onEndBattle }: Pick<BattleFlowProps, "battle" | "busy" | "onOpenVoting" | "onEndBattle">): ReactNode {
+  const [endArmed, setEndArmed] = useState(false);
+  const host = participantFor(battle, "host");
+  const guest = participantFor(battle, "guest");
+  const current = battle.history[0] ?? battle.round;
+  function end(): void {
+    if (endArmed) { setEndArmed(false); void onEndBattle(); return; }
+    setEndArmed(true); window.setTimeout(() => setEndArmed(false), 2500);
+  }
+  return <section className="flow-sheet flow-sheet--scoreboard"><div className="flow-title-row"><div className="flow-title-row__avatars"><CreatorMark name={host?.displayName ?? "Host"} role="host" /><CreatorMark name={guest?.displayName ?? "Guest"} role="guest" /></div><div><p className="eyebrow">Session score</p><h1>Scoreboard</h1><p className="flow-score">@{host?.displayName ?? "Host"} <b>{battle.score.host}</b> – <b>{battle.score.guest}</b> @{guest?.displayName ?? "Guest"}</p></div></div>{current && <div className="flow-history"><span>Round #{"sequence" in current ? current.sequence : "—"}</span><strong>{current.assignments.map((assignment) => `${assignment.targetDisplayName} faced ${assignment.title ?? "no challenge"}`).join(" · ")}</strong><span>{current.outcome === "draw" ? "Draw" : current.outcome === "host" ? `@${host?.displayName ?? "Host"} won` : current.outcome === "guest" ? `@${guest?.displayName ?? "Guest"} won` : "Recorded"}</span></div>}<div className="flow-sheet__actions"><button className={`button ${endArmed ? "button--primary" : "button--text button--danger"}`} type="button" disabled={busy} onClick={end}>{endArmed ? "Tap again to end" : "End session"}</button>{battle.status !== "ended" && <button className="button button--primary" type="button" disabled={busy} onClick={() => void onOpenVoting()}>Start next round</button>}</div></section>;
+}
+
+function BattleFlow(props: BattleFlowProps): ReactNode {
+  const { battle, user } = props;
+  const [editingChallenges, setEditingChallenges] = useState(false);
+  const hasRival = battle.participants.some((participant) => participant.role === "guest");
+  const bothApproved = battle.challengeSet?.approvedByUserIds.length === 2;
+  const bothOverlays = battle.participants.length === 2 && battle.participants.every((participant) => participant.overlayConfirmedAt);
+  const round = battle.round;
+  useEffect(() => {
+    if (!battle.challengeSet || !bothApproved || round) setEditingChallenges(false);
+  }, [battle.challengeSet?.id, battle.challengeSet?.version, bothApproved, round?.id]);
+  let stage: FlowStage = "scoreboard";
+  if (battle.status === "ended") stage = "scoreboard";
+  else if (!hasRival || battle.status === "setup") stage = "invite";
+  else if (!battle.challengeSet || !bothApproved) stage = "agree";
+  else if (!bothOverlays) stage = "overlay";
+  else if (!round || round.phase === "voting") stage = "pick";
+  else if (["revealed", "countdown", "active"].includes(round.phase)) stage = "play";
+  else if (round.phase === "complete" && !round.outcome || ["no-votes", "stopped", "invalidated"].includes(round.phase)) stage = "result";
+  if (editingChallenges && !round) stage = "agree";
+
+  const content = stage === "invite" ? <FlowInvite {...props} />
+    : stage === "agree" ? <FlowAgreement {...props} onContinue={editingChallenges ? () => setEditingChallenges(false) : undefined} />
+      : stage === "overlay" ? <FlowOverlaySetup {...props} onEditChallenges={() => setEditingChallenges(true)} />
+        : stage === "pick" ? <FlowPick {...props} />
+          : stage === "play" ? <FlowPlay {...props} />
+            : stage === "result" ? <FlowResult {...props} />
+              : <FlowScoreboard {...props} />;
+  return <section className="flow-frame"><FlowHeader stage={stage} battle={battle} user={user} onSignOut={props.onSignOut} />{content}</section>;
+}
+
 function CreatorView({ user, battle, invite, initialOverlayUrl, onRefresh, onSignOut }: {
   user: SessionUser;
   battle: Battle | null;
@@ -697,76 +1017,54 @@ function CreatorView({ user, battle, invite, initialOverlayUrl, onRefresh, onSig
 
   return (
     <PageShell>
-      <main className="creator-stage">
-        <section className="creator-intro">
-          <div>
-            <p className="eyebrow">{user.isDemo ? "Simulated demo streamer" : "Connected streamer"}</p>
-            <h1>@{user.displayName}</h1>
-            <p>{user.isDemo ? "This isolated demo uses simulated identities and picks. It is not connected to Twitch." : "Backseat is set up for one rival and two distinct Twitch chats."}</p>
-          </div>
-          <button className="button button--text" type="button" onClick={() => void onSignOut()}>Sign out</button>
-        </section>
+      <main className="creator-stage creator-stage--flow">
+        {error && <Notice tone="error">{error}</Notice>}
+        {invite && <section className="flow-frame flow-frame--invite-decision"><InviteDecision invite={invite} battle={battle} accepting={isAccepting} onAccept={acceptInvite} /></section>}
 
-        <section className="lower-sheet lower-sheet--creator">
-          {error && <Notice tone="error">{error}</Notice>}
-          {invite && <InviteDecision invite={invite} battle={battle} accepting={isAccepting} onAccept={acceptInvite} />}
+        {!battle && !invite && !user.isDemo && (
+          <section className="flow-sheet flow-sheet--new-session" aria-labelledby="create-title">
+            <p className="eyebrow">Connected as @{user.displayName}</p>
+            <h1 id="create-title">Start a session with your rival.</h1>
+            <p className="lede">Create the private, one-time invitation first. You will agree on the challenges before either chat can pick.</p>
+            <button className="button button--primary" type="button" disabled={isCreating} onClick={() => void createBattle()}>
+              {isCreating ? "Creating…" : "Create a session"}
+            </button>
+          </section>
+        )}
+        {!battle && !invite && user.isDemo && (
+          <section className="flow-sheet flow-sheet--new-session" aria-labelledby="demo-ended-title">
+            <p className="eyebrow">Simulated demo ended</p>
+            <h1 id="demo-ended-title">Connect Twitch for a real session.</h1>
+            <p className="lede">This isolated demo uses simulated identities and picks. It cannot receive Twitch chat or create a live session.</p>
+            <button className="button button--secondary" type="button" onClick={() => void onSignOut()}>Sign out</button>
+          </section>
+        )}
 
-          {!battle && !invite && !user.isDemo && (
-            <section className="empty-battle" aria-labelledby="create-title">
-              <p className="eyebrow">Start your session</p>
-              <h2 id="create-title">Create a battle, then invite one rival.</h2>
-              <p>Creating a battle does not open picks or simulate chat. It creates the host seat and a short-lived, single-use invitation.</p>
-              <button className="button button--primary" type="button" disabled={isCreating} onClick={() => void createBattle()}>
-                {isCreating ? "Creating…" : "Invite your rival"}
-              </button>
-            </section>
-          )}
-          {!battle && !invite && user.isDemo && (
-            <section className="empty-battle" aria-labelledby="demo-ended-title">
-              <p className="eyebrow">Simulated demo ended</p>
-              <h2 id="demo-ended-title">Connect Twitch for a real battle.</h2>
-              <p>Demo identities cannot create a real battle or receive Twitch events. Sign out, then connect Twitch when you are ready to test the real integration.</p>
-            </section>
-          )}
-
-          {battle && (
-            <>
-              <BattleIdentity battle={battle} user={user} />
-              {battle.status === "setup" && battle.role === "host" && (
-                <section className="invite-panel" aria-labelledby="invite-panel-title">
-                  <p className="eyebrow">Host setup</p>
-                  <h2 id="invite-panel-title">Invite your rival.</h2>
-                  <p>Only the invited streamer can claim this guest seat. If you need a new link, rotating it revokes the previous invitation.</p>
-                  {inviteUrl && <CopyControl value={inviteUrl} label="battle-invitation-link" />}
-                  <button className="button button--secondary" type="button" disabled={isRotatingInvitation} onClick={() => void rotateInvitation()}>
-                    {isRotatingInvitation ? "Creating invitation…" : inviteUrl ? "Rotate invitation link" : "Create fresh invitation link"}
-                  </button>
-                </section>
-              )}
-              <BattleControls
-                battle={battle}
-                user={user}
-                overlayUrl={overlayUrl}
-                busy={isMutatingBattle || isCreatingOverlay}
-                onCreateOverlay={createOverlay}
-                onConfirmOverlay={confirmOverlay}
-                onProposeChallenges={proposeChallenges}
-                onApproveChallenges={approveChallenges}
-                onOpenVoting={openVoting}
-                onReady={(roundId) => mutateBattle(`/api/battles/current/rounds/${roundId}/ready`)}
-                onUnready={(roundId) => mutateBattle(`/api/battles/current/rounds/${roundId}/unready`)}
-                onCancelStart={(roundId) => mutateBattle(`/api/battles/current/rounds/${roundId}/cancel-start`)}
-                onLockInPicks={(roundId) => mutateBattle(`/api/battles/current/rounds/${roundId}/lock-picks`, { stateVersion: battle.stateVersion })}
-                onStopRound={(roundId) => mutateBattle(`/api/battles/current/rounds/${roundId}/stop`)}
-                onRecordOutcome={(roundId, outcome) => mutateBattle(`/api/battles/current/rounds/${roundId}/outcome`, { outcome })}
-                onEndBattle={() => mutateBattle("/api/battles/current/end", { stateVersion: battle.stateVersion })}
-                onSimulateVote={(sourceRole, option) => mutateBattle("/api/demo/votes", { sourceRole, option })}
-                onSimulateRivalReady={(roundId) => mutateBattle(`/api/demo/rounds/${roundId}/rival-ready`)}
-              />
-              {isCreatingOverlay && <p className="inline-progress" aria-live="polite">Creating your private overlay link…</p>}
-            </>
-          )}
-        </section>
+        {battle && <BattleFlow
+          battle={battle}
+          user={user}
+          overlayUrl={overlayUrl}
+          inviteUrl={inviteUrl}
+          busy={isMutatingBattle || isCreatingOverlay}
+          invitationBusy={isRotatingInvitation}
+          onCreateInvitation={rotateInvitation}
+          onCreateOverlay={createOverlay}
+          onConfirmOverlay={confirmOverlay}
+          onProposeChallenges={proposeChallenges}
+          onApproveChallenges={approveChallenges}
+          onOpenVoting={openVoting}
+          onReady={(roundId) => mutateBattle(`/api/battles/current/rounds/${roundId}/ready`)}
+          onUnready={(roundId) => mutateBattle(`/api/battles/current/rounds/${roundId}/unready`)}
+          onCancelStart={(roundId) => mutateBattle(`/api/battles/current/rounds/${roundId}/cancel-start`)}
+          onLockInPicks={(roundId) => mutateBattle(`/api/battles/current/rounds/${roundId}/lock-picks`, { stateVersion: battle.stateVersion })}
+          onStopRound={(roundId) => mutateBattle(`/api/battles/current/rounds/${roundId}/stop`)}
+          onRecordOutcome={(roundId, outcome) => mutateBattle(`/api/battles/current/rounds/${roundId}/outcome`, { outcome })}
+          onEndBattle={() => mutateBattle("/api/battles/current/end", { stateVersion: battle.stateVersion })}
+          onSimulateVote={(sourceRole, option) => mutateBattle("/api/demo/votes", { sourceRole, option })}
+          onSimulateRivalReady={(roundId) => mutateBattle(`/api/demo/rounds/${roundId}/rival-ready`)}
+          onSignOut={onSignOut}
+        />}
+        {isCreatingOverlay && <p className="inline-progress" aria-live="polite">Creating your private overlay link…</p>}
       </main>
     </PageShell>
   );
